@@ -23,6 +23,7 @@ Prefer this order of solutions:
 When choosing between them:
 - If only one client performs the action, sync the action.
 - If all clients already execute the same simulation method, do **not** sync it again; only patch RNG or local-only behavior if that method is still nondeterministic.
+- If a local UI only ends by calling an action vanilla MP already syncs (for example `BillStack.AddBill` or normal `Bill_Production` config), keep the UI local and do **not** add extra compat sync unless the mod bypasses vanilla sync paths or adds nondeterminism before the final action.
 - Prefer attribute-style patches and the existing patch loader over manual Harmony wiring unless there is a concrete reason not to.
 
 ## RNG rules
@@ -82,6 +83,7 @@ Patch it only when one of these is true:
 - keep float menus / confirmation dialogs local
 - sync only the final chosen action
 - let local previews, staged edits, and temporary window state stay local when the real commit happens later
+- if the final commit is already synced by vanilla MP, do not wrap it again in compat just because it came from mod UI
 
 ### Bad
 - rebuilding the entire gizmo yourself
