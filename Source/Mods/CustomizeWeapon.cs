@@ -26,7 +26,6 @@ namespace Multiplayer.Compat
         private static FieldInfo modificationDataPartField;
         private static FieldInfo modificationDataTraitField;
         private static FieldInfo modificationDataModuleDefField;
-        private static MethodInfo randomizeGeneratedWeaponTraitsMethod;
 
         private static bool suppressLocalDispatch;
 
@@ -40,8 +39,6 @@ namespace Multiplayer.Compat
             var jobDispatcherType = AccessTools.TypeByName("CWF.Controllers.JobDispatcher");
             modificationDataType = AccessTools.TypeByName("CWF.ModificationData");
             modificationTypeType = AccessTools.TypeByName("CWF.ModificationType");
-            randomizeGeneratedWeaponTraitsMethod = AccessTools.DeclaredMethod("CWF.HarmonyPatches.Postfix_PawnWeaponGenerator_TryGenerateWeaponFor:Postfix")
-                ?? AccessTools.Method("CWF.HarmonyPatches.Postfix_PawnWeaponGenerator_TryGenerateWeaponFor:Postfix");
 
             if (weaponWindowType == null || modificationSessionType == null || jobDispatcherType == null ||
                 modificationDataType == null || modificationTypeType == null)
@@ -69,27 +66,19 @@ namespace Multiplayer.Compat
                 return;
             }
 
-            MP.RegisterSyncMethod(typeof(CustomizeWeapon), nameof(SyncedDispatch));
-
-            MpCompat.harmony.Patch(AccessTools.Method(weaponWindowType, nameof(Window.PostClose)),
-                prefix: new HarmonyMethod(typeof(CustomizeWeapon), nameof(PreWeaponWindowPostClose)));
-            MpCompat.harmony.Patch(dispatchMethod,
-                prefix: new HarmonyMethod(typeof(CustomizeWeapon), nameof(PreJobDispatcherDispatch)));
-
-            if (randomizeGeneratedWeaponTraitsMethod != null)
-            {
-                MpCompat.harmony.Patch(randomizeGeneratedWeaponTraitsMethod,
-                    prefix: new HarmonyMethod(typeof(CustomizeWeapon), nameof(PreRandomizeGeneratedWeaponTraits)),
-                    finalizer: new HarmonyMethod(typeof(CustomizeWeapon), nameof(PostRandomizeGeneratedWeaponTraits)));
-            }
+            MpCompatPatchLoader.LoadPatch<CustomizeWeapon>();
         }
 
+        [MpCompatPrefix("CWF.WeaponWindow", nameof(Window.PostClose))]
         private static void PreWeaponWindowPostClose(object __instance)
         {
             if (!MP.IsInMultiplayer || MP.IsExecutingSyncCommand)
                 return;
 
             var session = weaponWindowSessionField.GetValue(__instance);
+            if (session == null)
+                return;
+
             var weapon = sessionWeaponField.GetValue(session) as Thing;
 
             if (weapon == null)
@@ -111,9 +100,11 @@ namespace Multiplayer.Compat
             }
         }
 
+        [MpCompatPrefix("CWF.Controllers.JobDispatcher", "Dispatch")]
         private static bool PreJobDispatcherDispatch()
             => !suppressLocalDispatch || !MP.IsInMultiplayer || MP.IsExecutingSyncCommand;
 
+        [MpCompatPrefix("CWF.HarmonyPatches.Postfix_PawnWeaponGenerator_TryGenerateWeaponFor", "Postfix")]
         private static void PreRandomizeGeneratedWeaponTraits(Pawn pawn, out bool __state)
         {
             __state = MP.IsInMultiplayer;
@@ -124,12 +115,14 @@ namespace Multiplayer.Compat
             Rand.PushState(GetGeneratedWeaponSeed(pawn));
         }
 
+        [MpCompatFinalizer("CWF.HarmonyPatches.Postfix_PawnWeaponGenerator_TryGenerateWeaponFor", "Postfix")]
         private static void PostRandomizeGeneratedWeaponTraits(bool __state)
         {
             if (__state)
                 Rand.PopState();
         }
 
+        [MpCompatSyncMethod]
         private static void SyncedDispatch(Thing weapon, List<(int changeType, Def part, Def trait, ThingDef moduleDef)> changes)
         {
             var dispatcher = jobDispatcherConstructor.Invoke(new object[] { weapon });
