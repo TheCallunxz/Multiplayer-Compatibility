@@ -20,17 +20,27 @@ Prefer this order of solutions:
 4. `[MpCompatSyncMethod]`, `[MpCompatSyncWorker]`, `[MpCompatSyncField]` via `MpCompatPatchLoader.LoadPatch<T>()`.
 5. Only if absolutely necessary, a tiny wrapper/transpiler that routes an original mod call through a synced method.
 
+Timing and registration defaults:
+- Register patches immediately by default.
+- Use `LongEventHandler.ExecuteWhenFinished(...)` / `LatePatch` only when the mod's types are not safe to touch early (for example static constructors that load textures/assets, or types that only exist after long-event startup).
+- If a gizmo lambda only calls a named instance/static method that already represents the real state change, prefer syncing that named method directly instead of the lambda.
+- Mark dev-only actions explicitly with `.SetDebugOnly()` and skip known non-gameplay/debug ordinals with `.Skip(...)` when using grouped lambda registrations.
+
 When choosing between them:
 - If only one client performs the action, sync the action.
 - If all clients already execute the same simulation method, do **not** sync it again; only patch RNG or local-only behavior if that method is still nondeterministic.
 - If a local UI only ends by calling an action vanilla MP already syncs (for example `BillStack.AddBill` or normal `Bill_Production` config), keep the UI local and do **not** add extra compat sync unless the mod bypasses vanilla sync paths or adds nondeterminism before the final action.
 - Prefer attribute-style patches and the existing patch loader over manual Harmony wiring unless there is a concrete reason not to.
+- Do **not** add custom "failed to resolve runtime types/members" scaffolding in a compat file. Prefer normal accessor setup and let `MpCompatPatchLoader` surface registration failures centrally.
+- When reflection is needed, prefer `AccessTools.FieldRefAccess(...)` / `AccessTools.StaticFieldRefAccess(...)` over raw `FieldInfo` whenever feasible; use raw `FieldInfo` only when a field ref is not practical. Likewise, prefer cached invokers like `MethodInvoker.GetHandler(...)` over repeated raw `MethodInfo.Invoke(...)` plumbing.
 
 ## RNG rules
 
 ### Safe RNG
 Usually **do not patch** RNG that runs during normal simulation/ticking/mapgen/incident execution.
 If all clients execute the same code path in the same order, using RNG is just part of gameplay and is already deterministic.
+
+`Verse.Rand` is the multiplayer-managed RNG, but it is only safe when the callsite itself is safe (shared deterministic simulation, or an explicitly seeded/isolated entry point). Do **not** assume a `Verse.Rand` call is safe just because it uses `Rand`; check whether it runs in local UI, a client-only preview, or a shared path with proven divergent incoming RNG state.
 
 Examples:
 - ticking comps
@@ -41,6 +51,10 @@ Examples:
 
 ### Unsafe RNG
 Patch RNG when it happens in **client-local UI/interface code** or otherwise outside synchronized simulation.
+
+Treat `System.Random` and `UnityEngine.Random` as suspicious by default. If a mod uses them in gameplay logic, usually redirect them through `PatchingUtilities.PatchSystemRand(...)`, `PatchSystemRandCtor(...)`, or `PatchUnityRand(...)` rather than leaving them untouched.
+
+Treat collection shuffling and random selection as RNG-sensitive too. `Shuffle`, `InRandomOrder`, `RandomElement`, and `TryRandomElement` are only as deterministic as both the RNG state **and** the source collection order. If the source is not in a stable order across clients (for example `HashSet`, `Dictionary`, cached lists built from unstable traversal, or UI-generated lists), sort/materialize it to a stable order first or patch the callsite.
 
 Examples:
 - dialog drawing code choosing a random result
@@ -59,6 +73,11 @@ This is different from syncing the method:
 - use a **sync method** when only one client performs the action
 - use a **seeded RNG wrapper** when all clients already run the same method, but need the same random result
 
+Use the `PatchingUtilities` helpers as follows:
+- `PatchSystemRand(...)` / `PatchSystemRandCtor(...)` for `System.Random`
+- `PatchUnityRand(...)` for `UnityEngine.Random`
+- `PatchPushPopRand(...)` only to isolate `Verse.Rand` side effects when seeded determinism is not the goal
+
 Do **not** use plain `Rand.PushState()` / `Rand.PopState()` as a magic fix for shared-state RNG.
 Unseeded push/pop only isolates RNG side effects; it does not make different clients roll the same result.
 
@@ -74,16 +93,20 @@ Patch it only when one of these is true:
 - the RNG runs in local-only UI code
 - you have a real desync trace pointing at that path
 - you can clearly show the method is entered with potentially different RNG state on different clients
+- or the random result depends on an input collection whose iteration order is not guaranteed to match across clients
 
 ## Gizmo and dialog rules
 
 ### Good
 - keep the original gizmo
 - sync the original lambda/delegate that performs the real state change
+- if the lambda only forwards to a named method, sync that named method instead
 - keep float menus / confirmation dialogs local
 - sync only the final chosen action
 - let local previews, staged edits, and temporary window state stay local when the real commit happens later
 - if the final commit is already synced by vanilla MP, do not wrap it again in compat just because it came from mod UI
+- for dialogs that continuously edit shared fields, prefer watching the specific sync fields during `DoWindowContents` and use shared dialog-close helpers where appropriate instead of syncing the whole window
+- if UI code mutates shared state locally before the final synced action, snapshot the old state, revert the local mutation, then apply the confirmed change through sync
 
 ### Bad
 - rebuilding the entire gizmo yourself
@@ -141,14 +164,21 @@ Also do **not** override settings to defaults just because they look scary; if c
 4. Decide whether the fix is:
    - syncing a final action, or
    - seeding/isolating RNG inside a method that already runs on all clients.
-5. Sync that original action instead of rebuilding UI.
-6. Validate lambda ordinals against source, and if possible against compiled assemblies.
+5. Prefer a named method over a lambda when the lambda is only a thin forwarder.
+6. Sync that original action instead of rebuilding UI.
+7. Validate lambda ordinals against source, and if possible against compiled assemblies.
+8. For any `RandomElement`/`Shuffle`/`InRandomOrder` use, verify that the input collection order is stable before deciding the RNG is safe.
 
 ## Maintenance rules
 
 - Prefer upstream method calls over compat-side clones.
 - Prefer short compat files with obvious intent.
 - If a patch starts needing lots of reflection fields and copied UI logic, stop and look for a smaller original delegate/method to sync.
+- If a patch starts inventing its own runtime-resolution/error-reporting framework, stop and fold it back into the existing MP-Compat patterns.
+- Default to field refs for field access in compat code. Do not reach for `FieldInfo` first unless the field-ref approach is genuinely not workable for that case.
+- Prefer stable ordering before random choice. If random selection is made from a collection built from unordered traversal, sort by a deterministic key (`thingIDNumber`, `loadID`, `defName`, index, etc.) before selection or document why the source order is already stable.
+- `SyncWorker`s should serialize stable identifiers (things, defs, indices, map/zone references, etc.) and reconstruct transient commands/dialog objects on the other side instead of trying to sync the whole runtime object graph.
+- Avoid long-lived static compat state. If a temporary guard/swap is needed, bracket it tightly and restore it with `try/finally`.
 - Comments should explain **why** a thing is unsafe in MP, not just that it uses RNG.
 - If you add a patch, be able to say exactly what desync it prevents.
 

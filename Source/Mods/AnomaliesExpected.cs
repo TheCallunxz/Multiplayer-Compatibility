@@ -1,5 +1,4 @@
 using System.Collections.Generic;
-using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -12,47 +11,31 @@ namespace Multiplayer.Compat;
 [MpCompatFor("MrHydralisk.AnomaliesExpected")]
 internal class AnomaliesExpected
 {
-    private static FieldInfo entityEntryThingDefField;
-    private static FieldInfo entityEntryCodexEntryField;
-    private static MethodInfo entityEntrySpawnThingMethod;
-    private static FieldInfo gameComponentInstanceField;
-    private static MethodInfo getEntityEntryFromThingDefMethod;
-    private static MethodInfo getEntityEntryFromEntityCodexEntryDefMethod;
-    private static FieldInfo entityDatabaseAnomalyDialogCompField;
+    private static FastInvokeHandler entityEntrySpawnThingMethod;
+    private static AccessTools.FieldRef<object, ThingDef> entityEntryThingDefField;
+    private static AccessTools.FieldRef<object, EntityCodexEntryDef> entityEntryCodexEntryField;
+    private static AccessTools.FieldRef<object, ThingComp> entityDatabaseAnomalyDialogCompField;
+
+    private static AccessTools.FieldRef<object> gameComponentInstanceField;
+    private static FastInvokeHandler getEntityEntryFromThingDefMethod;
+    private static FastInvokeHandler getEntityEntryFromEntityCodexEntryDefMethod;
 
     [MpCompatSyncField("AnomaliesExpected.Comp_EntityDatabaseAnomaly", "selectedIncidentDef")]
     private static ISyncField selectedIncidentField = null;
 
     public AnomaliesExpected(ModContentPack mod)
-        => LongEventHandler.ExecuteWhenFinished(LatePatch);
-
-    private static void LatePatch()
     {
         var aeEntityEntryType = AccessTools.TypeByName("AnomaliesExpected.AEEntityEntry");
         var gameComponentType = AccessTools.TypeByName("AnomaliesExpected.GameComponent_AnomaliesExpected");
         var dialogEntityDatabaseAnomalyType = AccessTools.TypeByName("AnomaliesExpected.Dialog_AEEntityDatabaseAnomaly");
 
-        if (aeEntityEntryType == null || gameComponentType == null || dialogEntityDatabaseAnomalyType == null)
-        {
-            Log.Warning("MPCompat :: Anomalies Expected - failed to resolve one or more runtime types");
-            return;
-        }
-
-        entityEntryThingDefField = AccessTools.Field(aeEntityEntryType, "ThingDef");
-        entityEntryCodexEntryField = AccessTools.Field(aeEntityEntryType, "EntityCodexEntryDef");
-        entityEntrySpawnThingMethod = AccessTools.Method(aeEntityEntryType, "SpawnThing");
-        gameComponentInstanceField = AccessTools.Field(gameComponentType, "instance");
-        getEntityEntryFromThingDefMethod = AccessTools.Method(gameComponentType, "GetEntityEntryFromThingDef");
-        getEntityEntryFromEntityCodexEntryDefMethod = AccessTools.Method(gameComponentType, "GetEntityEntryFromEntityCodexEntryDef");
-        entityDatabaseAnomalyDialogCompField = AccessTools.Field(dialogEntityDatabaseAnomalyType, "entityDatabaseAnomaly");
-
-        if (entityEntryThingDefField == null || entityEntryCodexEntryField == null || entityEntrySpawnThingMethod == null ||
-            gameComponentInstanceField == null || getEntityEntryFromThingDefMethod == null ||
-            getEntityEntryFromEntityCodexEntryDefMethod == null || entityDatabaseAnomalyDialogCompField == null)
-        {
-            Log.Warning("MPCompat :: Anomalies Expected - failed to resolve one or more runtime members");
-            return;
-        }
+        entityEntryThingDefField = AccessTools.FieldRefAccess<ThingDef>(aeEntityEntryType, "ThingDef");
+        entityEntryCodexEntryField = AccessTools.FieldRefAccess<EntityCodexEntryDef>(aeEntityEntryType, "EntityCodexEntryDef");
+        entityEntrySpawnThingMethod = MethodInvoker.GetHandler(AccessTools.Method(aeEntityEntryType, "SpawnThing"));
+        gameComponentInstanceField = AccessTools.StaticFieldRefAccess<object>(AccessTools.Field(gameComponentType, "instance"));
+        getEntityEntryFromThingDefMethod = MethodInvoker.GetHandler(AccessTools.Method(gameComponentType, "GetEntityEntryFromThingDef"));
+        getEntityEntryFromEntityCodexEntryDefMethod = MethodInvoker.GetHandler(AccessTools.Method(gameComponentType, "GetEntityEntryFromEntityCodexEntryDef"));
+        entityDatabaseAnomalyDialogCompField = AccessTools.FieldRefAccess<ThingComp>(dialogEntityDatabaseAnomalyType, "entityDatabaseAnomaly");
 
         MpCompatPatchLoader.LoadPatch<AnomaliesExpected>();
 
@@ -85,7 +68,7 @@ internal class AnomaliesExpected
 
         Rand.PushState();
 
-        __state = entityDatabaseAnomalyDialogCompField.GetValue(__instance) as ThingComp;
+        __state = entityDatabaseAnomalyDialogCompField(__instance);
         if (__state != null)
         {
             MP.WatchBegin();
@@ -117,7 +100,7 @@ internal class AnomaliesExpected
         if (MP.IsInMultiplayer)
             SyncedSpawnThing(entry, thingDef, parent);
         else
-            entityEntrySpawnThingMethod.Invoke(entry, new object[] { thingDef, parent });
+            entityEntrySpawnThingMethod(entry, thingDef, parent);
     }
 
     [MpCompatSyncMethod]
@@ -126,7 +109,7 @@ internal class AnomaliesExpected
         if (entry == null || thingDef == null)
             return;
 
-        entityEntrySpawnThingMethod.Invoke(entry, new object[] { thingDef, parent });
+        entityEntrySpawnThingMethod(entry, thingDef, parent);
     }
 
     [MpCompatSyncWorker("AnomaliesExpected.AEEntityEntry")]
@@ -138,8 +121,8 @@ internal class AnomaliesExpected
             if (entry == null)
                 return;
 
-            sync.Write(entityEntryThingDefField.GetValue(entry) as ThingDef);
-            sync.Write(entityEntryCodexEntryField.GetValue(entry) as EntityCodexEntryDef);
+            sync.Write(entityEntryThingDefField(entry));
+            sync.Write(entityEntryCodexEntryField(entry));
         }
         else
         {
@@ -157,29 +140,29 @@ internal class AnomaliesExpected
 
     private static object ResolveEntityEntry(ThingDef thingDef, EntityCodexEntryDef codexEntry)
     {
-        var component = gameComponentInstanceField.GetValue(null);
+        var component = gameComponentInstanceField();
         if (component == null)
             return null;
 
         object entry = null;
 
         if (thingDef != null)
-            entry = getEntityEntryFromThingDefMethod.Invoke(component, new object[] { thingDef });
+            entry = getEntityEntryFromThingDefMethod(component, thingDef);
 
         if (entry == null && codexEntry != null)
-            entry = getEntityEntryFromEntityCodexEntryDefMethod.Invoke(component, new object[] { codexEntry });
+            entry = getEntityEntryFromEntityCodexEntryDefMethod(component, codexEntry);
 
         if (entry == null)
             return null;
 
-        var resolvedThingDef = entityEntryThingDefField.GetValue(entry) as ThingDef;
-        var resolvedCodexEntry = entityEntryCodexEntryField.GetValue(entry) as EntityCodexEntryDef;
+        var resolvedThingDef = entityEntryThingDefField(entry);
+        var resolvedCodexEntry = entityEntryCodexEntryField(entry);
 
         if (thingDef != null && resolvedThingDef != thingDef)
             return null;
 
         if (codexEntry != null && resolvedCodexEntry != codexEntry)
-            return getEntityEntryFromEntityCodexEntryDefMethod.Invoke(component, new object[] { codexEntry });
+            return getEntityEntryFromEntityCodexEntryDefMethod(component, codexEntry);
 
         return entry;
     }
