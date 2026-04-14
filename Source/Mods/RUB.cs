@@ -10,7 +10,7 @@ internal class RUB
     public RUB(ModContentPack mod)
         => MpCompatPatchLoader.LoadPatch<RUB>();
 
-    [MpCompatPrefix("RUB.CompUseEffect_RUB", nameof(CompUseEffect.DoEffect))]
+    [MpCompatPrefix("RUB.CompUseEffect_RUB", "DoEffect")]
     private static void PreUseEffect(object __instance, Pawn usedBy, out bool __state)
     {
         __state = MP.IsInMultiplayer;
@@ -25,7 +25,7 @@ internal class RUB
         Rand.PushState(seed);
     }
 
-    [MpCompatFinalizer("RUB.CompUseEffect_RUB", nameof(CompUseEffect.DoEffect))]
+    [MpCompatFinalizer("RUB.CompUseEffect_RUB", "DoEffect")]
     private static void PostUseEffect(bool __state)
     {
         if (__state)
