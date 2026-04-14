@@ -12,7 +12,7 @@ namespace Multiplayer.Compat;
 [MpCompatFor("MrHydralisk.AnomaliesExpected")]
 internal class AnomaliesExpected
 {
-    private static MethodBase entityEntrySpawnThingBaseMethod;
+    private static MethodInfo entityEntrySpawnThingBaseMethod;
     private static FastInvokeHandler entityEntrySpawnThingMethod;
     private static AccessTools.FieldRef<object, ThingDef> entityEntryThingDefField;
     private static AccessTools.FieldRef<object, EntityCodexEntryDef> entityEntryCodexEntryField;
