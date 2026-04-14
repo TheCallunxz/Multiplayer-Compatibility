@@ -1,13 +1,14 @@
-using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
 using RimWorld.Planet;
+using System;
+using System.Collections.Generic;
+using System.Linq;
+using System.Reflection;
 using UnityEngine;
 using Verse;
+using Verse.Noise;
 using Verse.Sound;
 
 namespace Multiplayer.Compat
@@ -19,8 +20,7 @@ namespace Multiplayer.Compat
     class VanillaGravshipExpanded
     {
         // Dialog_ConfigureVacuumRequirement
-        private static AccessTools.FieldRef<object, float> vacCheckpointResistanceField;
-        private static AccessTools.FieldRef<object, bool> vacCheckpointAllowDraftedField;
+        private static MethodInfo setSelectedVacCheckpointsToMethod;
 
         // Window_SetDesiredMaintenance
         private static ISyncField maintenanceThresholdSync;
@@ -34,9 +34,9 @@ namespace Multiplayer.Compat
 
         // Gizmo_OxygenProvider
         private static Type oxygenGizmoType;
-        private static AccessTools.FieldRef<object, object> oxygenProviderFromGizmo;
-        private static ISyncField oxygenRechargeAtField;
-        private static ISyncField oxygenAutoRechargeField;
+        private static AccessTools.FieldRef<object, ThingComp> oxygenProviderFromGizmo;
+        private static ISyncField oxygenTargetValuePctField;
+        private static AccessTools.FieldRef<object, Gizmo_Slider> oxygenGizmoFromComp;
 
         // Building_VacBarrier_Recolorable color sync
         private static Type vacBarrierRecolorableType;
@@ -44,10 +44,6 @@ namespace Multiplayer.Compat
         private static FieldInfo colorClipboardFieldInfo;
         private static AccessTools.FieldRef<object, object> vacBarrierDialogBarriersField;
         private static MethodInfo notifyBarrierColorChangedMethod;
-
-        // Mod settings - orbitalObjectsMultiplier must be consistent in MP
-        private static AccessTools.FieldRef<float> orbitalObjectsMultiplierField;
-        private static float savedMultiplier;
 
         // VGE launch flow - sync tile selection for gravship destinations
         private static AccessTools.FieldRef<object> vgeLaunchStateField;
@@ -62,17 +58,25 @@ namespace Multiplayer.Compat
         private static Func<PlanetTile, bool> hasGravshipSession;
         private static MethodInfo stopTilePickerInt;
 
-        // TakeoffEnded map decision - cached VGE extension methods
-        private static MethodInfo canEverKeepThisMapMethod;
-        private static MethodInfo shouldAlwaysKeepThisMapMethod;
-        private static MethodInfo shouldHaveKeepMapUIMethod;
-
         // VGE PreLaunchConfirmation sync - VGE replaces the vanilla launch action
         private static Action capturedOriginalLaunchAction;
         private static MethodInfo destroyTreesAroundSubstructureMethod;
         private static MethodInfo consumeFuelMethod;
         private static MethodInfo initiateTakeoffMethod;
         private static PropertyInfo validSubstructureProperty;
+
+        // Dialog_NamePlayerGravship
+        private static MethodInfo gravshipNamedMethod;
+
+
+        // MP stuffs to modify MpComp.factionData[factionID].areaManager
+        // Should be replaced if MPAPI exposed these
+        private static Type areaType;
+        private static MethodInfo mpCompMethod;
+        private static FieldInfo factionDataField;
+        private static FieldInfo areaManagerField;
+        // VGE gets current roof area
+        private static MethodInfo BuildVacBarrierRoofMethod;
 
         public VanillaGravshipExpanded(ModContentPack mod)
         {
@@ -104,10 +108,7 @@ namespace Multiplayer.Compat
             {
                 var type = AccessTools.TypeByName("VanillaGravshipExpanded.CompWorldArtillery");
 
-                var startAttack = AccessTools.DeclaredMethod(type, "StartAttack");
-                MP.RegisterSyncMethod(startAttack);
-                MpCompat.harmony.Patch(startAttack,
-                    prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreStartAttack)));
+                MP.RegisterSyncMethod(type, "StartAttack");
 
                 MP.RegisterSyncMethod(type, "Reset");
             }
@@ -166,16 +167,15 @@ namespace Multiplayer.Compat
             #region Dialog_ConfigureVacuumRequirement
 
             {
-                var checkpointType = AccessTools.TypeByName("VanillaGravshipExpanded.Building_VacCheckpoint");
-                vacCheckpointResistanceField = AccessTools.FieldRefAccess<float>(checkpointType, "requiredResistance");
-                vacCheckpointAllowDraftedField = AccessTools.FieldRefAccess<bool>(checkpointType, "allowDrafted");
-
                 var dialogType = AccessTools.TypeByName("VanillaGravshipExpanded.Dialog_ConfigureVacuumRequirement");
+                setSelectedVacCheckpointsToMethod = AccessTools.DeclaredMethod(dialogType, "SetSelectedVacCheckpointsTo");
+
                 MpCompat.harmony.Patch(
-                    AccessTools.DeclaredMethod(dialogType, "SetSelectedVacCheckpointsTo"),
+                    setSelectedVacCheckpointsToMethod,
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreSetSelectedVacCheckpoints)));
 
-                MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedSetVacCheckpoint));
+                MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedSetVacCheckpoints))
+                    .SetContext(SyncContext.MapSelected);
             }
 
             #endregion
@@ -214,9 +214,11 @@ namespace Multiplayer.Compat
             #region Building_Gravlift (launch to orbit)
 
             {
-                // Gizmo lambda sets IsGravliftLaunch then calls ShowRitualBeginWindow.
-                // MP intercepts ShowRitualBeginWindow to create a RitualSession.
-                MpCompat.RegisterLambdaMethod("VanillaGravshipExpanded.Building_Gravlift", "GetGizmos", 0);
+                // Ordinal 2: gizmo action — sets IsGravliftLaunch, calls ShowLaunchRitual
+                // Captures locals (isInOrbit, comp) via display class, so must use Delegate not Method.
+                // (0: LINQ Select projection, 1: LINQ FirstOrDefault predicate — both non-capturing in <>c)
+                // Verified: https://github.com/Vanilla-Expanded/VanillaGravshipExpanded/blob/main/Source/Things/Building_Gravlift.cs
+                MpCompat.RegisterLambdaDelegate("VanillaGravshipExpanded.Building_Gravlift", "GetGizmos", 2);
             }
 
             #endregion
@@ -306,7 +308,7 @@ namespace Multiplayer.Compat
                 MpCompat.harmony.Patch(
                     AccessTools.DeclaredMethod(typeof(Precept_Ritual), "ShowRitualBeginWindow"),
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreShowRitualClearStaleState))
-                        { priority = Priority.First });
+                    { priority = Priority.First });
 
                 // Patch CheckConfirmSettle to sync VGE's tile selection
                 MpCompat.harmony.Patch(
@@ -322,14 +324,14 @@ namespace Multiplayer.Compat
                 var preLaunchMethod = AccessTools.DeclaredMethod(typeof(GravshipUtility), "PreLaunchConfirmation");
                 MpCompat.harmony.Patch(preLaunchMethod,
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(CaptureOriginalLaunchAction))
-                        { priority = Priority.First });
+                    { priority = Priority.First });
                 MpCompat.harmony.Patch(preLaunchMethod,
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(WrapVgeLaunchAction))
-                        { priority = Priority.Last });
+                    { priority = Priority.Last });
 
                 MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedVgeLaunchConfirm));
 
-                // Reflect VGE methods used in the launch action reconstruction
+                // Cache VGE methods called in the launch action
                 destroyTreesAroundSubstructureMethod = AccessTools.DeclaredMethod(
                     typeof(WorldComponent_GravshipController), "DestroyTreesAroundSubstructure");
                 consumeFuelMethod = AccessTools.DeclaredMethod(typeof(Building_GravEngine), "ConsumeFuel");
@@ -340,49 +342,19 @@ namespace Multiplayer.Compat
 
             #endregion
 
-            #region Mod settings sync (orbitalObjectsMultiplier)
-
-            {
-                // orbitalObjectsMultiplier is a per-player mod setting that affects
-                // WorldComponent_LocationGenerator.WorldComponentTick via transpiler.
-                // If host and client have different values, world RNG state diverges.
-                // Force a consistent value (default 2.0) during world tick in MP.
-                var settingsType = AccessTools.TypeByName("VanillaGravshipExpanded.GravshipsMod_Settings");
-                orbitalObjectsMultiplierField = AccessTools.StaticFieldRefAccess<float>(
-                    AccessTools.DeclaredField(settingsType, "orbitalObjectsMultiplier"));
-
-                MpCompat.harmony.Patch(
-                    AccessTools.DeclaredMethod(typeof(WorldComponent_LocationGenerator), "WorldComponentTick"),
-                    prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreLocationGeneratorTick)),
-                    postfix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PostLocationGeneratorTick)));
-
-                MpCompat.harmony.Patch(
-                    AccessTools.DeclaredMethod(typeof(WorldComponent_LocationGenerator), "GenerateUntilTarget", new[] { typeof(PlanetLayer) }),
-                    prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreLocationGeneratorTick)),
-                    postfix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PostLocationGeneratorTick)));
-            }
-
-            #endregion
-
             #region TakeoffEnded map decision sync
 
             {
                 // VGE's TakeoffEnded patch shows a Dialog_MessageBox asking the player to
-                // settle or abandon the map after gravship launch. The dialog is per-client
-                // and the button actions (settle/abandon) are not synced.
-                // Patch VGE's prefix to replace the dialog actions with synced versions.
+                // settle or abandon the map after gravship launch. The button actions
+                // (settle/abandon) are local functions — per-client and unsynced.
+                // Let VGE create the dialog natively, then swap the button actions with
+                // synced versions in a postfix. No VGE condition logic is copied.
                 var takeoffPatchType = AccessTools.TypeByName(
                     "VanillaGravshipExpanded.WorldComponent_GravshipController_TakeoffEnded_Patch");
                 MpCompat.harmony.Patch(
                     AccessTools.DeclaredMethod(takeoffPatchType, "Prefix"),
-                    prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreTakeoffEndedPatch)));
-
-                canEverKeepThisMapMethod = AccessTools.Method(
-                    "VanillaGravshipExpanded.WorldComponent_GravshipController_TakeoffEnded_Patch:CanEverKeepThisMap");
-                shouldAlwaysKeepThisMapMethod = AccessTools.Method(
-                    "VanillaGravshipExpanded.WorldComponent_GravshipController_TakeoffEnded_Patch:ShouldAlwaysKeepThisMap");
-                shouldHaveKeepMapUIMethod = AccessTools.Method(
-                    "VanillaGravshipExpanded.WorldComponent_GravshipController_TakeoffEnded_Patch:ShouldHaveKeepMapUI");
+                    postfix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PostTakeoffEndedPatch)));
 
                 MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedSettleTile));
                 MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedAbandonTile));
@@ -395,9 +367,10 @@ namespace Multiplayer.Compat
             {
                 // Dialog_NamePlayerGravship is created from UpdateSubstructureIfNeeded during tick.
                 // Each client can type and submit a different name independently.
-                // Sync the Named method and close the dialog on all clients.
-                MpCompat.harmony.Patch(
-                    AccessTools.DeclaredMethod(typeof(Dialog_NamePlayerGravship), "Named"),
+                // Sync the Named method — the prefix lets the original run during sync execution
+                // so we call vanilla's Named on the dialog instance (open on all clients).
+                gravshipNamedMethod = AccessTools.DeclaredMethod(typeof(Dialog_NamePlayerGravship), "Named");
+                MpCompat.harmony.Patch(gravshipNamedMethod,
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreGravshipNamed)));
 
                 MP.RegisterSyncMethod(typeof(VanillaGravshipExpanded), nameof(SyncedGravshipNamed));
@@ -409,13 +382,17 @@ namespace Multiplayer.Compat
 
             {
                 var compType = AccessTools.TypeByName("VanillaGravshipExpanded.CompApparelOxygenProvider");
-                oxygenRechargeAtField = MP.RegisterSyncField(compType, "rechargeAtCharges").SetBufferChanges();
-                oxygenAutoRechargeField = MP.RegisterSyncField(compType, "automaticRechargeEnabled");
+                MP.RegisterSyncMethod(AccessTools.PropertySetter(compType, "AutomaticRechargeEnabled"));
 
                 oxygenGizmoType = AccessTools.TypeByName("VanillaGravshipExpanded.Gizmo_OxygenProvider");
-                oxygenProviderFromGizmo = AccessTools.FieldRefAccess<object>(oxygenGizmoType, "oxygenProvider");
+                oxygenProviderFromGizmo = AccessTools.FieldRefAccess<ThingComp>(oxygenGizmoType, "oxygenProvider");
+                oxygenGizmoFromComp = AccessTools.FieldRefAccess<Gizmo_Slider>(compType, "oxygenConfigurationGizmo");
 
-                // Watch both fields around GizmoOnGUI with explicit WatchBegin/WatchEnd.
+                oxygenTargetValuePctField = MP.RegisterSyncField(oxygenGizmoType, "targetValuePct").SetBufferChanges();
+                AccessTools.Field(oxygenTargetValuePctField.GetType(), "targetType")
+                    .SetValue(oxygenTargetValuePctField, oxygenGizmoType);
+                MP.RegisterSyncWorker<Gizmo_Slider>(SyncOxygenGizmo, oxygenGizmoType);
+
                 MpCompat.harmony.Patch(
                     AccessTools.DeclaredMethod(typeof(Gizmo_Slider), nameof(Gizmo_Slider.GizmoOnGUI)),
                     prefix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PreOxygenGizmoOnGUI)),
@@ -423,64 +400,48 @@ namespace Multiplayer.Compat
             }
 
             #endregion
+
+            #region MultiFaction sync
+
+            {
+                areaType = AccessTools.TypeByName("VanillaGravshipExpanded.Area_BuildVacBarrierRoof");
+                mpCompMethod = AccessTools.Method(AccessTools.TypeByName("Multiplayer.Client.Extensions"), "MpComp");
+                factionDataField = AccessTools.Field(AccessTools.TypeByName("Multiplayer.Client.MultiplayerMapComp"), "factionData");
+                areaManagerField = AccessTools.Field(AccessTools.TypeByName("Multiplayer.Client.FactionMapData"), "areaManager");
+
+                BuildVacBarrierRoofMethod = AccessTools.Method(AccessTools.TypeByName("VanillaGravshipExpanded.AreaManagerExtensions"), "BuildVacBarrierRoof");
+
+                MpCompat.harmony.Patch(
+                    AccessTools.Method(AccessTools.TypeByName("Multiplayer.Client.MapSetup"), "InitNewFactionData"),
+                    postfix: new HarmonyMethod(typeof(VanillaGravshipExpanded), nameof(PostMapSetupInitNewFactionData)));
+            }
+            #endregion
         }
 
         #region Patches
 
         /// <summary>
-        /// Hide world view immediately on the calling client when starting
-        /// an artillery attack, since waiting for sync may take a while.
-        /// </summary>
-        private static void PreStartAttack()
-        {
-            if (!MP.IsExecutingSyncCommand)
-                CameraJumper.TryHideWorld();
-        }
-
-        /// <summary>
-        /// In MP, replace the Find.Selector iteration in SetSelectedVacCheckpointsTo
-        /// with per-building synced calls.
+        /// In MP, redirect SetSelectedVacCheckpointsTo through a synced call.
+        /// SyncContext.MapSelected restores the initiating player's selection on
+        /// all clients, so the original method sees the correct checkpoints.
         /// </summary>
         private static bool PreSetSelectedVacCheckpoints(float resistance, bool allowDrafted)
         {
             if (!MP.IsInMultiplayer)
                 return true;
 
-            foreach (var selected in Find.Selector.SelectedObjects)
-            {
-                if (selected is Thing thing && thing.GetType().Name == "Building_VacCheckpoint"
-                    && thing.Faction == Faction.OfPlayer)
-                {
-                    SyncedSetVacCheckpoint(thing, resistance, allowDrafted);
-                }
-            }
+            // During sync execution, let the original run — SyncContext.MapSelected
+            // has already restored the correct selection on all clients.
+            if (MP.IsExecutingSyncCommand)
+                return true;
 
+            SyncedSetVacCheckpoints(resistance, allowDrafted);
             return false;
         }
 
-
-        private static void SyncedSetVacCheckpoint(Thing checkpoint, float resistance, bool allowDrafted)
+        private static void SyncedSetVacCheckpoints(float resistance, bool allowDrafted)
         {
-            resistance = UnityEngine.Mathf.Clamp01(resistance);
-            vacCheckpointResistanceField(checkpoint) = resistance;
-            vacCheckpointAllowDraftedField(checkpoint) = allowDrafted;
-
-            var map = checkpoint.Map;
-            if (map?.Biome?.inVacuum == true)
-            {
-                // Clear reachability cache for player pawns on vacuum maps
-                var tmpEntries = new List<ReachabilityCache.CachedEntry>();
-
-                foreach (var entry in map.reachability.cache.cacheDict)
-                {
-                    var pawn = entry.Key.TraverseParms.pawn;
-                    if (pawn != null && pawn.Faction == Faction.OfPlayer)
-                        tmpEntries.Add(entry.Key);
-                }
-
-                for (var i = 0; i < tmpEntries.Count; i++)
-                    map.reachability.cache.cacheDict.Remove(tmpEntries[i]);
-            }
+            setSelectedVacCheckpointsToMethod.Invoke(null, new object[] { resistance, allowDrafted });
         }
 
         private static void PreMaintenanceDoWindowContents()
@@ -675,12 +636,13 @@ namespace Multiplayer.Compat
         }
 
         /// <summary>
-        /// Synced VGE launch confirmation. Replicates VGE's replacement launchAction
-        /// (from GravshipUtility_PreLaunchConfirmation_Patch) on all clients.
-        /// The target tile was stored in vgeCheckConfirmSettleTargetTileField during
-        /// the earlier tile selection step.
+        /// Synced VGE launch confirmation. Calls VGE's launch methods directly
+        /// via reflection. The tile was stored in vgeCheckConfirmSettleTargetTileField
+        /// during the earlier tile selection step.
+        /// Note: we cannot invoke VGE's PreLaunchConfirmation prefix to construct
+        /// the delegate because it looks up the ritual lordJob, which may have
+        /// completed by sync execution time.
         /// </summary>
-
         private static void SyncedVgeLaunchConfirm(Building_GravEngine engine)
         {
             var tile = vgeCheckConfirmSettleTargetTileField();
@@ -698,8 +660,9 @@ namespace Multiplayer.Compat
                 }
             }
 
-            // Replicate VGE's launch action:
-            // DestroyTreesAroundSubstructure, ConsumeFuel, InitiateTakeoff, clear state
+            // Call VGE's launch methods via reflection.
+            // DestroyTreesAroundSubstructure has optional params — must pass all 4 via reflection.
+            // VGE calls it with 2 args (compiler fills defaults), but Invoke needs all of them.
             if (destroyTreesAroundSubstructureMethod != null && validSubstructureProperty != null)
             {
                 var substructure = validSubstructureProperty.GetValue(engine);
@@ -714,61 +677,33 @@ namespace Multiplayer.Compat
         }
 
         /// <summary>
-        /// Intercept VGE's TakeoffEnded patch to replace dialog button actions
-        /// with synced versions. VGE creates Dialog_MessageBox with settle/abandon
-        /// actions that are per-client and unsynced.
+        /// Postfix on VGE's TakeoffEnded prefix. VGE creates Dialog_MessageBox with
+        /// local-function button actions that are per-client and unsynced. We let VGE
+        /// handle all condition logic and dialog creation natively, then swap the
+        /// button actions with synced versions.
         /// </summary>
-        private static bool PreTakeoffEndedPatch(WorldComponent_GravshipController __0)
+        private static void PostTakeoffEndedPatch(WorldComponent_GravshipController __0)
         {
             if (!MP.IsInMultiplayer)
-                return true;
+                return;
 
-            if (__0.mapHasGravAnchor || __0.map?.info?.parent == null)
-                return false;
+            // Check if VGE added a Dialog_MessageBox
+            if (Find.WindowStack.Count == 0)
+                return;
+            if (Find.WindowStack.Windows[Find.WindowStack.Count - 1] is not Dialog_MessageBox dialog)
+                return;
 
-            var map = __0.map;
-            var mapParent = map.Parent;
+            var mapParent = __0.map?.Parent;
             if (mapParent == null)
-                return false;
+                return;
 
-            if (canEverKeepThisMapMethod != null && !(bool)canEverKeepThisMapMethod.Invoke(null, new object[] { mapParent }))
-                return false;
+            // buttonB is SettleTile in both dialog variants
+            if (dialog.buttonBAction != null)
+                dialog.buttonBAction = () => SyncedSettleTile(mapParent);
 
-            if (shouldAlwaysKeepThisMapMethod != null && (bool)shouldAlwaysKeepThisMapMethod.Invoke(null, new object[] { mapParent }))
-            {
-                __0.mapHasGravAnchor = true;
-                if (mapParent.CanBeSettled && !map.attackTargetsCache.TargetsHostileToColony
-                    .Any(item => GenHostility.IsActiveThreatToPlayer(item)))
-                {
-                    Find.WindowStack.Add(new Dialog_MessageBox(
-                        "VGE_MapDecisionSettleText".Translate(),
-                        "VGE_DontSettle".Translate(),
-                        null,
-                        "VGE_SettleMap".Translate(),
-                        () => SyncedSettleTile(mapParent),
-                        buttonADestructive: false
-                    ));
-                }
-            }
-            else if (shouldHaveKeepMapUIMethod != null && (bool)shouldHaveKeepMapUIMethod.Invoke(null, new object[] { mapParent }))
-            {
-                __0.mapHasGravAnchor = true;
-                Find.WindowStack.Add(new Dialog_MessageBox(
-                    "VGE_MapDecisionText".Translate(),
-                    "VGE_DiscardMap".Translate(),
-                    () => SyncedAbandonTile(mapParent),
-                    "VGE_KeepMap".Translate(),
-                    () => SyncedSettleTile(mapParent),
-                    buttonADestructive: true
-                ));
-            }
-            else
-            {
-                __0.mapHasGravAnchor = true;
-                SyncedAbandonTile(mapParent);
-            }
-
-            return false;
+            // buttonA is AbandonTile in the keep/abandon dialog, null in the settle-only dialog
+            if (dialog.buttonAAction != null)
+                dialog.buttonAAction = () => SyncedAbandonTile(mapParent);
         }
 
 
@@ -812,61 +747,39 @@ namespace Multiplayer.Compat
         /// <summary>
         /// Intercept Dialog_NamePlayerGravship.Named to sync the gravship name.
         /// Without this, each client can submit a different name independently.
+        /// The dialog is opened from tick context (UpdateSubstructureIfNeeded),
+        /// so it exists on all clients — we call the original Named during sync.
         /// </summary>
         private static bool PreGravshipNamed(Window __instance, string s)
         {
             if (!MP.IsInMultiplayer)
                 return true;
 
-            // Get the engine from the dialog via reflection
+            // During sync execution, let the original Named run on the dialog
+            if (MP.IsExecutingSyncCommand)
+                return true;
+
+            // Get the engine from the dialog to use as sync-safe reference
             var engineField = AccessTools.Field(typeof(Dialog_NamePlayerGravship), "engine");
             if (engineField?.GetValue(__instance) is Building_GravEngine engine)
-            {
-                if (!MP.IsExecutingSyncCommand)
-                    SyncedGravshipNamed(engine, s);
-            }
+                SyncedGravshipNamed(engine, s);
 
             return false;
         }
 
-
         private static void SyncedGravshipNamed(Building_GravEngine engine, string name)
         {
-            engine.RenamableLabel = name;
-            engine.nameHidden = false;
-            Messages.Message("PlayerGravshipGainsName".Translate(name), MessageTypeDefOf.TaskCompletion, false);
-
-            // Close the naming dialog on all clients
+            // Dialog is open on all clients (opened from tick context).
+            // Find it and call the original Named — the prefix lets it through
+            // because IsExecutingSyncCommand is true.
             for (var i = Find.WindowStack.Windows.Count - 1; i >= 0; i--)
             {
-                if (Find.WindowStack.Windows[i] is Dialog_NamePlayerGravship)
+                if (Find.WindowStack.Windows[i] is Dialog_NamePlayerGravship dialog)
                 {
-                    Find.WindowStack.Windows[i].Close();
-                    break;
+                    gravshipNamedMethod.Invoke(dialog, new object[] { name });
+                    return;
                 }
             }
-        }
-
-        /// <summary>
-        /// Force orbitalObjectsMultiplier to its default value during
-        /// WorldComponent_LocationGenerator methods in MP, so host and client
-        /// produce identical results regardless of per-player mod settings.
-        /// </summary>
-        private static void PreLocationGeneratorTick()
-        {
-            if (!MP.IsInMultiplayer)
-                return;
-
-            savedMultiplier = orbitalObjectsMultiplierField();
-            orbitalObjectsMultiplierField() = 2f; // orbitalObjectsMultiplierBase default
-        }
-
-        private static void PostLocationGeneratorTick()
-        {
-            if (!MP.IsInMultiplayer)
-                return;
-
-            orbitalObjectsMultiplierField() = savedMultiplier;
         }
 
         private static void PreOxygenGizmoOnGUI(Gizmo_Slider __instance)
@@ -874,10 +787,8 @@ namespace Multiplayer.Compat
             if (!MP.IsInMultiplayer || __instance.GetType() != oxygenGizmoType)
                 return;
 
-            var comp = oxygenProviderFromGizmo(__instance);
             MP.WatchBegin();
-            oxygenRechargeAtField.Watch(comp);
-            oxygenAutoRechargeField.Watch(comp);
+            oxygenTargetValuePctField.Watch(__instance);
         }
 
         private static void PostOxygenGizmoOnGUI(Gizmo_Slider __instance)
@@ -886,6 +797,19 @@ namespace Multiplayer.Compat
                 return;
 
             MP.WatchEnd();
+        }
+
+        private static void SyncOxygenGizmo(SyncWorker sync, ref Gizmo_Slider gizmo)
+        {
+            if (sync.isWriting)
+            {
+                sync.Write(oxygenProviderFromGizmo(gizmo));
+            }
+            else
+            {
+                var comp = sync.Read<ThingComp>();
+                gizmo = oxygenGizmoFromComp(comp);
+            }
         }
 
         /// <summary>
@@ -939,6 +863,26 @@ namespace Multiplayer.Compat
             notifyBarrierColorChangedMethod?.Invoke(barrier, null);
         }
 
+
+        /// <summary>
+        /// VGE create VacBarrierRoofArea only for map owner's faction at their mapcomponet's finalizer
+        /// Patch this so everytime a new factiondata on map is created we create same area for them if they dont have one
+        /// </summary>
+
+        private static void PostMapSetupInitNewFactionData(Map map, Faction f)
+        {
+            var mpComp = mpCompMethod?.Invoke(null, new object[] { map });
+            var factionDataDict = factionDataField?.GetValue(mpComp) as System.Collections.IDictionary;
+            var factionData = factionDataDict[f.loadID];
+            AreaManager manager = (AreaManager)areaManagerField?.GetValue(factionData);
+            var area = BuildVacBarrierRoofMethod?.Invoke(null, new object[] { manager });
+            if (area == null)
+            {
+                var newArea = (Area)Activator.CreateInstance(areaType, manager);
+                manager.areas.Add(newArea);
+            }
+        }
         #endregion
     }
+
 }
