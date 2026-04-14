@@ -12,6 +12,7 @@ namespace Multiplayer.Compat;
 [MpCompatFor("MrHydralisk.AnomaliesExpected")]
 internal class AnomaliesExpected
 {
+    private static MethodBase entityEntrySpawnThingBaseMethod;
     private static FastInvokeHandler entityEntrySpawnThingMethod;
     private static AccessTools.FieldRef<object, ThingDef> entityEntryThingDefField;
     private static AccessTools.FieldRef<object, EntityCodexEntryDef> entityEntryCodexEntryField;
@@ -32,7 +33,8 @@ internal class AnomaliesExpected
 
         entityEntryThingDefField = AccessTools.FieldRefAccess<ThingDef>(aeEntityEntryType, "ThingDef");
         entityEntryCodexEntryField = AccessTools.FieldRefAccess<EntityCodexEntryDef>(aeEntityEntryType, "EntityCodexEntryDef");
-        entityEntrySpawnThingMethod = MethodInvoker.GetHandler(AccessTools.Method(aeEntityEntryType, "SpawnThing"));
+        entityEntrySpawnThingBaseMethod = AccessTools.Method(aeEntityEntryType, "SpawnThing");
+        entityEntrySpawnThingMethod = MethodInvoker.GetHandler(entityEntrySpawnThingBaseMethod);
         gameComponentInstanceField = AccessTools.StaticFieldRefAccess<object>(AccessTools.Field(gameComponentType, "instance"));
         getEntityEntryFromThingDefMethod = MethodInvoker.GetHandler(AccessTools.Method(gameComponentType, "GetEntityEntryFromThingDef"));
         getEntityEntryFromEntityCodexEntryDefMethod = MethodInvoker.GetHandler(AccessTools.Method(gameComponentType, "GetEntityEntryFromEntityCodexEntryDef"));
@@ -91,7 +93,7 @@ internal class AnomaliesExpected
 
     [MpCompatTranspiler("AnomaliesExpected.Dialog_AEEntityDB", "EntityRecord")]
     private static IEnumerable<CodeInstruction> ReplaceSpawnThingCall(IEnumerable<CodeInstruction> instructions, MethodBase __originalMethod)
-        => instructions.ReplaceMethod(entityEntrySpawnThingMethod,
+        => instructions.ReplaceMethod(entityEntrySpawnThingBaseMethod,
             to: MpMethodUtil.MethodOf(SpawnThingWithSync),
             baseMethod: __originalMethod,
             expectedReplacements: 1);
