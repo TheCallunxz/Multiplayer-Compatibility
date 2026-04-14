@@ -7,7 +7,7 @@ using Verse;
 
 namespace Multiplayer.Compat;
 
-/// <summary>Anomalies Expected by MrHydralisk</summary>
+/// <summary>Anomalies Expected by MrHydralisk</summary>d
 /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=3399875765"/>
 [MpCompatFor("MrHydralisk.AnomaliesExpected")]
 internal class AnomaliesExpected
@@ -44,21 +44,23 @@ internal class AnomaliesExpected
 
         // Hospital bed: sign + donor mode toggle.
         var type = AccessTools.TypeByName("AnomaliesExpected.Comp_AnomalyHospitalBed");
-        MpCompat.RegisterLambdaDelegate(type, nameof(ThingComp.CompGetGizmosExtra), 0, 2);
+        MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 0);
+        MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 2);
 
         // Atmospheric controller/cooler: +/- temp methods + reset button.
         type = AccessTools.TypeByName("AnomaliesExpected.Comp_AtmosphericController");
         MP.RegisterSyncMethod(type, "InterfaceChangeTargetTemperature");
-        MpCompat.RegisterLambdaDelegate(type, nameof(ThingComp.CompGetGizmosExtra), 0);
+        MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 0);
 
         type = AccessTools.TypeByName("AnomaliesExpected.Comp_AtmosphericCooler");
         MP.RegisterSyncMethod(type, "InterfaceChangeTargetTemperature");
-        MpCompat.RegisterLambdaDelegate(type, nameof(ThingComp.CompGetGizmosExtra), 0);
+        MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 0);
 
         // Speedometer: keep the mod's own gizmos/UI, only sync the final actions.
         // 0 = open level float menu, 1 = apply chosen level, 2 = open confirmation, 3 = confirmed removal.
         type = AccessTools.TypeByName("AnomaliesExpected.Hediff_SpeedometerLevel");
-        MpCompat.RegisterLambdaDelegate(type, nameof(Hediff.GetGizmos), 1, 3);
+        MP.RegisterSyncDelegateLambda(type, nameof(Hediff.GetGizmos), 1);
+        MP.RegisterSyncDelegateLambda(type, nameof(Hediff.GetGizmos), 3);
     }
 
     [MpCompatPrefix("AnomaliesExpected.Dialog_AEEntityDatabaseAnomaly", nameof(Window.DoWindowContents))]
