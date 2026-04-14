@@ -40,6 +40,8 @@ internal class AnomaliesExpected
         getEntityEntryFromEntityCodexEntryDefMethod = MethodInvoker.GetHandler(AccessTools.Method(gameComponentType, "GetEntityEntryFromEntityCodexEntryDef"));
         entityDatabaseAnomalyDialogCompField = AccessTools.FieldRefAccess<ThingComp>(dialogEntityDatabaseAnomalyType, "entityDatabaseAnomaly");
 
+        MP.RegisterSyncMethod(AccessTools.DeclaredMethod(typeof(CompTempControl), nameof(CompTempControl.InterfaceChangeTargetTemperature)));
+
         MpCompatPatchLoader.LoadPatch<AnomaliesExpected>();
 
         // Hospital bed: sign + donor mode toggle.
@@ -49,11 +51,9 @@ internal class AnomaliesExpected
 
         // Atmospheric controller/cooler: +/- temp methods + reset button.
         type = AccessTools.TypeByName("AnomaliesExpected.Comp_AtmosphericController");
-        MP.RegisterSyncMethod(type, "InterfaceChangeTargetTemperature");
         MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 0);
 
         type = AccessTools.TypeByName("AnomaliesExpected.Comp_AtmosphericCooler");
-        MP.RegisterSyncMethod(type, "InterfaceChangeTargetTemperature");
         MP.RegisterSyncDelegateLambda(type, nameof(ThingComp.CompGetGizmosExtra), 0);
 
         // Speedometer: keep the mod's own gizmos/UI, only sync the final actions.
