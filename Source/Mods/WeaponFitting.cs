@@ -64,6 +64,11 @@ internal class WeaponFitting
                 postfix: new HarmonyMethod(typeof(WeaponFitting), nameof(PostWFWeaponPatch)));
         }
 
+        // Weapon Fitting applies its own def mutations from a startup static constructor.
+        // Compat can load after that one-shot pass already ran, so queue a late fallback
+        // scan as well instead of relying on the postfix alone.
+        LongEventHandler.ExecuteWhenFinished(PostWFWeaponPatch);
+
         MpCompatPatchLoader.LoadPatch<WeaponFitting>();
     }
 
@@ -100,10 +105,16 @@ internal class WeaponFitting
             if (!uniqueDef.defName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            if (uniqueDef.comps == null)
+                continue;
+
             var baseDefName = uniqueDef.defName.Substring(0, uniqueDef.defName.Length - suffix.Length);
             var baseDef = DefDatabase<ThingDef>.GetNamedSilentFail(baseDefName);
             if (baseDef == null)
                 continue;
+
+            if (baseDef.comps == null)
+                baseDef.comps = new List<CompProperties>();
 
             // Skip if the base weapon already has fitting support
             if ((bool)hasUniqueCompMethod(null, baseDef))
@@ -168,12 +179,16 @@ internal class WeaponFitting
             baseDef.comps.Add(emptyComp);
 
             // Add to the weapon modification browse category
-            if (modCategory != null
-                && !baseDef.thingCategories.NullOrEmpty()
-                && !baseDef.thingCategories.Contains(modCategory))
+            if (modCategory != null)
             {
-                baseDef.thingCategories.Add(modCategory);
-                modCategory.childThingDefs.Add(baseDef);
+                if (baseDef.thingCategories == null)
+                    baseDef.thingCategories = new List<ThingCategoryDef>();
+
+                if (!baseDef.thingCategories.Contains(modCategory))
+                    baseDef.thingCategories.Add(modCategory);
+
+                if (modCategory.childThingDefs != null && !modCategory.childThingDefs.Contains(baseDef))
+                    modCategory.childThingDefs.Add(baseDef);
             }
 
             Log.Message("[WeaponFitting/MpCompat] Auto-registered '" + baseDefName
