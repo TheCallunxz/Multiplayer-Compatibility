@@ -35,7 +35,9 @@ namespace Multiplayer.Compat
                 MpCompat.RegisterLambdaDelegate("GiddyUp.Harmony.Patch_PawnGetGizmos", "Postfix", 0);
 
                 // Stop waiting for rider (namespace changed to GiddyUpCore.RideAndRoll.Harmony)
-                MP.RegisterSyncMethod(AccessTools.TypeByName("GiddyUpCore.RideAndRoll.Harmony.Pawn_GetGizmos"), "PawnEndCurrentJob");
+                // Delay this registration until loading has finished so accessing the patch type can't trip
+                // its translation-dependent initialization before RimWorld has an active language.
+                LongEventHandler.ExecuteWhenFinished(RegisterRideAndRollGizmoSync);
             }
 
             // FloatMenus
@@ -92,6 +94,14 @@ namespace Multiplayer.Compat
 
         private static void PreSetRider(object __instance)
             => WatchTranferableCount(transferableField(parentClass(__instance)));
+
+        private static void RegisterRideAndRollGizmoSync()
+        {
+            var type = AccessTools.TypeByName("GiddyUpCore.RideAndRoll.Harmony.Pawn_GetGizmos");
+
+            if (type != null)
+                MP.RegisterSyncMethod(type, "PawnEndCurrentJob");
+        }
 
         private static void SyncExtendedPawnData(SyncWorker sync, ref object extendedPawnData)
         {
