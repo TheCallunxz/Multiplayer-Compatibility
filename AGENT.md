@@ -182,6 +182,37 @@ Also do **not** override settings to defaults just because they look scary; if c
 - Comments should explain **why** a thing is unsafe in MP, not just that it uses RNG.
 - If you add a patch, be able to say exactly what desync it prevents.
 
+## Full audit requirement
+
+When writing OR updating a compat patch for any mod, **always audit the entire mod source first**. Never assume the existing patch covered everything — original quality is unknown. Walk the whole codebase before touching a single line of compat code.
+
+Mandatory audit steps:
+1. Read every file that ends in `.cs` in the mod source.
+2. Record every `Command_Action`, `Command_Toggle`, `CompGetGizmosExtra`, `CompGetWornGizmosExtra`, `DoWindowContents`, gizmo lambda, `BeginTargeting`, `Rand.`/`Random`/`RandomElement`/`RandomInRange`/`Shuffle`/`InRandomOrder` call.
+3. For each one, trace it to the method that actually changes shared game state.
+4. Then and only then, decide what is already covered, what is newly needed, and what is safe to skip.
+
+Do **not** skip this step just because a patch already exists or looks comprehensive.
+
+## Sync worker type resolution — the declared-type rule
+
+MP serialises a synced method's `this` using the **declared** target type from `RegisterSyncMethod`, never the runtime type.
+
+Consequence: if you call `MP.RegisterSyncWorker<T>(handler, ConcreteSubclass)`, that worker will **never** be invoked when the sync method's `this` was registered against a *base* type.  
+`SyncWorkerDictionaryTree.TryGetValue` first checks `explicitEntries` keyed by the exact declared type, then walks `implicitEntries` trees.  A per-subclass explicit registration is useless if the sync method was registered on the base class.
+
+Rule: when a sync method is registered on a base type B, the sync worker **must** be registered for **B itself** (as explicit) — not for individual subtypes.
+
+```
+// WRONG — worker never called because StartAbilityJob is registered on BaseAbility
+MP.RegisterSyncWorker<ITargetingSource>(handler, typeof(ConcreteAbility)); // subtype
+
+// CORRECT — explicit entry keyed on the exact declared type wins over any implicit entry
+MP.RegisterSyncWorker<ITargetingSource>(handler, typeof(BaseAbility));     // base type
+```
+
+If an upstream compat (e.g., VEF) already registers an *implicit* worker for B, you can safely override it by registering an *explicit* worker for B — explicit entries are checked first.  Your explicit worker should implement the full behaviour for all subtypes (both the upstream case and your mod's special case).
+
 ## Good end state
 
 A good compat patch should look like this:
