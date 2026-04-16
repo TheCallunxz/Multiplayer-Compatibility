@@ -29,9 +29,12 @@ internal class WeaponFitting
     private static FieldInfo uniqueWeaponCategoriesField; // List<WeaponCategoryDef>
     private static FieldInfo maxTraitsField;              // int
     private static FastInvokeHandler hasUniqueCompMethod; // WF_Utility.HasUniqueComp(ThingDef)
+    private static int autoDetectRunCounter;
 
     public WeaponFitting(ModContentPack mod)
     {
+        Log.Message("[WeaponFitting/MpCompat] Initializing compat patch");
+
         // ---- Existing setup ----
         var gameComponentType = AccessTools.TypeByName("AncotLibrary.GameComponent_AncotLibrary");
         ancotGameComponentGetter = MethodInvoker.GetHandler(AccessTools.PropertyGetter(gameComponentType, "GC"));
@@ -55,6 +58,19 @@ internal class WeaponFitting
 
         hasUniqueCompMethod = MethodInvoker.GetHandler(AccessTools.Method("WeaponFitting.WF_Utility:HasUniqueComp"));
 
+        Log.Message("[WeaponFitting/MpCompat] Reflection setup: "
+            + "GameComponent=" + (gameComponentType != null)
+            + ", RenameDialog=" + (renameDialogType != null)
+            + ", UniqueNameMethod=" + (uniqueNameMethod != null)
+            + ", SetUniqueNameMethod=" + (setUniqueNameMethod != null)
+            + ", CompProperties_UniqueWeapon=" + (compPropsUniqueWeaponType != null)
+            + ", CompProperties_EmptyUniqueWeapon=" + (compPropsEmptyUniqueWeaponType != null)
+            + ", CompProperties_EquippableAbility=" + (compPropsEquippableAbilityType != null)
+            + ", CompProperties_EquippableAbilityReloadable=" + (compPropsEquippableAbilityReloadableType != null)
+            + ", weaponCategoriesField=" + (uniqueWeaponCategoriesField != null)
+            + ", max_traitsField=" + (maxTraitsField != null)
+            + ", HasUniqueCompMethod=" + (hasUniqueCompMethod != null));
+
         // Patch WF_weaponPatch postfix to run auto-detect after the vanilla XML pass
         var wfWeaponPatchMethod = AccessTools.Method("WeaponFitting.ThingGenerator_WeaponFittings:WF_weaponPatch");
         if (wfWeaponPatchMethod != null)
@@ -62,14 +78,22 @@ internal class WeaponFitting
             var harmony = new Harmony("mp.compat.weaponfitting.autodetect");
             harmony.Patch(wfWeaponPatchMethod,
                 postfix: new HarmonyMethod(typeof(WeaponFitting), nameof(PostWFWeaponPatch)));
+
+            Log.Message("[WeaponFitting/MpCompat] Patched WF_weaponPatch with auto-detect postfix");
+        }
+        else
+        {
+            Log.Warning("[WeaponFitting/MpCompat] Could not find WeaponFitting.ThingGenerator_WeaponFittings:WF_weaponPatch for postfix patching");
         }
 
         // Weapon Fitting applies its own def mutations from a startup static constructor.
         // Compat can load after that one-shot pass already ran, so queue a late fallback
         // scan as well instead of relying on the postfix alone.
+        Log.Message("[WeaponFitting/MpCompat] Scheduling late auto-detect fallback via LongEventHandler.ExecuteWhenFinished");
         LongEventHandler.ExecuteWhenFinished(PostWFWeaponPatch);
 
         MpCompatPatchLoader.LoadPatch<WeaponFitting>();
+        Log.Message("[WeaponFitting/MpCompat] MpCompatPatchLoader finished for WeaponFitting");
     }
 
     // -------------------------------------------------------------------------
@@ -84,10 +108,21 @@ internal class WeaponFitting
     /// </summary>
     private static void PostWFWeaponPatch()
     {
+        var runNumber = ++autoDetectRunCounter;
+        Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " started");
+
         if (compPropsUniqueWeaponType == null || compPropsEmptyUniqueWeaponType == null
             || uniqueWeaponCategoriesField == null || maxTraitsField == null
             || hasUniqueCompMethod == null)
+        {
+            Log.Warning("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " aborted due to missing reflection targets: "
+                + "CompProperties_UniqueWeapon=" + (compPropsUniqueWeaponType != null)
+                + ", CompProperties_EmptyUniqueWeapon=" + (compPropsEmptyUniqueWeaponType != null)
+                + ", weaponCategoriesField=" + (uniqueWeaponCategoriesField != null)
+                + ", max_traitsField=" + (maxTraitsField != null)
+                + ", HasUniqueCompMethod=" + (hasUniqueCompMethod != null));
             return;
+        }
 
         // Resolve the modification ThingCategoryDef lazily (defs are ready by now)
         var ancotDefOfType = AccessTools.TypeByName("AncotLibrary.AncotDefOf");
@@ -98,27 +133,52 @@ internal class WeaponFitting
             modCategory = modCatField?.GetValue(null) as ThingCategoryDef;
         }
 
+        Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " category setup: "
+            + "AncotDefOf=" + (ancotDefOfType != null)
+            + ", Ancot_WeaponsModification=" + (modCategory != null));
+
         const string suffix = "_Unique";
+        var scannedUniqueDefs = 0;
+        var patchedWeapons = 0;
+        var skippedAlreadySupported = 0;
+        var skippedMissingBase = 0;
+        var skippedMissingUniqueProps = 0;
+        var skippedMissingCategories = 0;
+        var skippedNullComps = 0;
 
         foreach (var uniqueDef in DefDatabase<ThingDef>.AllDefs)
         {
             if (!uniqueDef.defName.EndsWith(suffix, StringComparison.OrdinalIgnoreCase))
                 continue;
 
+            scannedUniqueDefs++;
+
             if (uniqueDef.comps == null)
+            {
+                skippedNullComps++;
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " skipped '" + uniqueDef.defName + "' because unique def has null comps");
                 continue;
+            }
 
             var baseDefName = uniqueDef.defName.Substring(0, uniqueDef.defName.Length - suffix.Length);
             var baseDef = DefDatabase<ThingDef>.GetNamedSilentFail(baseDefName);
             if (baseDef == null)
+            {
+                skippedMissingBase++;
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " skipped '" + uniqueDef.defName + "' because base def '" + baseDefName + "' was not found");
                 continue;
+            }
 
             if (baseDef.comps == null)
                 baseDef.comps = new List<CompProperties>();
 
             // Skip if the base weapon already has fitting support
             if ((bool)hasUniqueCompMethod(null, baseDef))
+            {
+                skippedAlreadySupported++;
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " skipped '" + baseDefName + "' because it already has unique/fitting support");
                 continue;
+            }
 
             // Find CompProperties_UniqueWeapon on the *_Unique def
             CompProperties uniqueProps = null;
@@ -131,12 +191,17 @@ internal class WeaponFitting
                 }
             }
             if (uniqueProps == null)
+            {
+                skippedMissingUniqueProps++;
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " skipped '" + uniqueDef.defName + "' because no CompProperties_UniqueWeapon was found");
                 continue;
+            }
 
             // Get weapon categories (List<WeaponCategoryDef>) from the _Unique weapon
             var categories = uniqueWeaponCategoriesField.GetValue(uniqueProps) as IList;
             if (categories == null || categories.Count == 0)
             {
+                skippedMissingCategories++;
                 Log.Warning("[WeaponFitting/MpCompat] '" + uniqueDef.defName
                     + "' has no weaponCategories — skipping auto-registration of '" + baseDefName + "'.");
                 continue;
@@ -162,13 +227,22 @@ internal class WeaponFitting
                     hasAbility = true;
             }
             if (alreadyHasUnique)
+            {
+                skippedAlreadySupported++;
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " skipped '" + baseDefName + "' during comp scan because it already has a unique comp");
                 continue;
+            }
 
             // Replace CompEquippable with CompEquippableAbilityReloadable if not already able
             if (!hasAbility && compEquippable != null && compPropsEquippableAbilityReloadableType != null)
             {
                 baseDef.comps.Remove(compEquippable);
                 baseDef.comps.Add((CompProperties)Activator.CreateInstance(compPropsEquippableAbilityReloadableType));
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " upgraded '" + baseDefName + "' to CompEquippableAbilityReloadable");
+            }
+            else if (!hasAbility && compEquippable == null)
+            {
+                Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " found no CompEquippable to replace on '" + baseDefName + "'");
             }
 
             // Build and inject a CompProperties_EmptyUniqueWeapon with 3 trait slots
@@ -191,9 +265,18 @@ internal class WeaponFitting
                     modCategory.childThingDefs.Add(baseDef);
             }
 
+            patchedWeapons++;
             Log.Message("[WeaponFitting/MpCompat] Auto-registered '" + baseDefName
                 + "' for fittings via '" + uniqueDef.defName + "'.");
         }
+
+        Log.Message("[WeaponFitting/MpCompat] Auto-detect run #" + runNumber + " finished: scanned=" + scannedUniqueDefs
+            + ", patched=" + patchedWeapons
+            + ", skippedAlreadySupported=" + skippedAlreadySupported
+            + ", skippedMissingBase=" + skippedMissingBase
+            + ", skippedMissingUniqueProps=" + skippedMissingUniqueProps
+            + ", skippedMissingCategories=" + skippedMissingCategories
+            + ", skippedNullComps=" + skippedNullComps);
     }
 
 
