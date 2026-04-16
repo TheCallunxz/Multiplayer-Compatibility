@@ -51,8 +51,13 @@ internal class WeaponFitting
         compPropsEquippableAbilityType = AccessTools.TypeByName("AncotLibrary.CompProperties_EquippableAbility");
         compPropsEquippableAbilityReloadableType = AccessTools.TypeByName("AncotLibrary.CompProperties_EquippableAbilityReloadable");
 
+        if (compPropsUniqueWeaponType == null)
+            compPropsUniqueWeaponType = compPropsEmptyUniqueWeaponType?.BaseType;
+
         if (compPropsUniqueWeaponType != null)
             uniqueWeaponCategoriesField = AccessTools.Field(compPropsUniqueWeaponType, "weaponCategories");
+        if (uniqueWeaponCategoriesField == null && compPropsEmptyUniqueWeaponType != null)
+            uniqueWeaponCategoriesField = AccessTools.Field(compPropsEmptyUniqueWeaponType, "weaponCategories");
         if (compPropsEmptyUniqueWeaponType != null)
             maxTraitsField = AccessTools.Field(compPropsEmptyUniqueWeaponType, "max_traits");
 
@@ -70,6 +75,12 @@ internal class WeaponFitting
             + ", weaponCategoriesField=" + (uniqueWeaponCategoriesField != null)
             + ", max_traitsField=" + (maxTraitsField != null)
             + ", HasUniqueCompMethod=" + (hasUniqueCompMethod != null));
+
+        Log.Message("[WeaponFitting/MpCompat] Resolved runtime types: "
+            + "CompProperties_UniqueWeapon=" + (compPropsUniqueWeaponType?.FullName ?? "<null>")
+            + ", CompProperties_EmptyUniqueWeapon=" + (compPropsEmptyUniqueWeaponType?.FullName ?? "<null>")
+            + ", EmptyUniqueWeapon.BaseType=" + (compPropsEmptyUniqueWeaponType?.BaseType?.FullName ?? "<null>")
+            + ", weaponCategoriesFieldOwner=" + (uniqueWeaponCategoriesField?.DeclaringType?.FullName ?? "<null>"));
 
         // Patch WF_weaponPatch postfix to run auto-detect after the vanilla XML pass
         var wfWeaponPatchMethod = AccessTools.Method("WeaponFitting.ThingGenerator_WeaponFittings:WF_weaponPatch");
