@@ -1,6 +1,7 @@
 ﻿using System;
 using System.Collections;
 using System.Linq;
+using System.Reflection;
 using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
@@ -41,7 +42,7 @@ namespace Multiplayer.Compat
 
         //// Altar and Rituals ////
         // Command_RitualEffect
-        private static FastInvokeHandler ritualEffectCommandCtor;
+        private static ConstructorInfo ritualEffectCommandCtor;
         private static AccessTools.FieldRef<object, Thing> ritualEffectCommandSourceField;
         private static AccessTools.FieldRef<object, object> ritualEffectCommandRitualField;
         private static AccessTools.FieldRef<object, object> ritualEffectCommandRitualRequestField;
@@ -141,7 +142,7 @@ namespace Multiplayer.Compat
                 var ritualTrackerType = AccessTools.TypeByName("DD.RitualTracker");
                 var ritualDefType = AccessTools.TypeByName("DD.RitualDef");
 
-                ritualEffectCommandCtor = MethodInvoker.GetHandler(AccessTools.DeclaredConstructor(ritualEffectCommand, new[] { typeof(Thing), ritualTrackerType, ritualDefType }));
+                ritualEffectCommandCtor = AccessTools.DeclaredConstructor(ritualEffectCommand, new[] { typeof(Thing), ritualTrackerType, ritualDefType });
                 ritualEffectCommandSourceField = AccessTools.FieldRefAccess<Thing>(ritualEffectCommand, "source");
                 ritualEffectCommandRitualField = AccessTools.FieldRefAccess<object>(ritualEffectCommand, "ritual");
                 ritualEffectCommandRitualRequestField = AccessTools.FieldRefAccess<object>(ritualEffectCommand, "ritualRequest");
@@ -286,7 +287,7 @@ namespace Multiplayer.Compat
                 var tracker = mapComponentTrackerRitualsField(mapComponent);
                 var def = sync.Read<Def>();
 
-                command = (Command)ritualEffectCommandCtor(null, source, tracker, def);
+                command = (Command)ritualEffectCommandCtor.Invoke(new object[] { source, tracker, def });
             }
         }
     }

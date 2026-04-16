@@ -179,10 +179,10 @@ internal class HautsTraits
         pawn.story.traits.GainTrait(trait, true);
 
         // Consume charges.
-        if (chargeSourceThing != null && !chargeSourceThing.Destroyed)
+        if (chargeSourceThing is ThingWithComps chargeSourceWithComps && !chargeSourceWithComps.Destroyed)
         {
             ThingComp chargeComp = null;
-            foreach (var comp in chargeSourceThing.AllComps)
+            foreach (var comp in chargeSourceWithComps.AllComps)
             {
                 if (compItemChargedType.IsInstanceOfType(comp))
                 {
