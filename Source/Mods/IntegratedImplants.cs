@@ -4,7 +4,7 @@ namespace Multiplayer.Compat;
 
 /// <summary>Integrated Implants by LTS</summary>
 /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=3223443793"/>
-[MpCompatFor("lts.i")]
+[MpCompatFor("lts.I")]
 internal class IntegratedImplants
 {
     public IntegratedImplants(ModContentPack mod)

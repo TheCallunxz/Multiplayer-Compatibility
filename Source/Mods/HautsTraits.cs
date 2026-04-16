@@ -11,7 +11,7 @@ namespace Multiplayer.Compat;
 
 /// <summary>Hauts' Traits by Hautarche</summary>
 /// <see href="https://steamcommunity.com/sharedfiles/filedetails/?id=3422847391"/>
-[MpCompatFor("hautarche.hautstraits")]
+[MpCompatFor("Hautarche.HautsTraits")]
 internal class HautsTraits
 {
     // TraitSerumWindow fields

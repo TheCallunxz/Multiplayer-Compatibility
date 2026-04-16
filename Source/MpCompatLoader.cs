@@ -11,12 +11,6 @@ namespace Multiplayer.Compat
 {
     public static class MpCompatLoader
     {
-        static string NormalizeModId(string modId)
-            => modId.NoModIdSuffix().ToLowerInvariant();
-
-        static string FormatCompatIds(string[] modIds)
-            => string.Join(", ", modIds.Select(modId => $"{modId} -> {NormalizeModId(modId)}"));
-
         internal static void Load(ModContentPack content)
         {
             LoadConditional(content);
@@ -47,28 +41,13 @@ namespace Multiplayer.Compat
                     .ToArray();
                 if (!attr.Any()) continue;
 
-                var compatIds = attr
-                    .Select(a => (string)a.ConstructorArguments.First().Value)
-                    .ToArray();
-
-                Log.Message($"MPCompat :: Conditional compat discovered {t.FullName} ids [{FormatCompatIds(compatIds)}]");
-
-                var matchedMods = attr.Select(a => (string)a.ConstructorArguments.First().Value)
-                    .Select(modId => LoadedModManager.RunningMods.FirstOrDefault(m => NormalizeModId(m.PackageId) == NormalizeModId(modId)))
-                    .Where(mod => mod != null)
-                    .ToArray();
-
-                var anyMod = matchedMods.Any();
-
-                if (anyMod)
+                var anyMod = attr.Any(a =>
                 {
-                    Log.Message($"MPCompat :: Conditional compat keep {t.FullName} matches [{string.Join(", ", matchedMods.Select(m => m.PackageId))}]");
-                }
-                else
-                {
-                    Log.Message($"MPCompat :: Conditional compat remove {t.FullName} (no installed mod match)");
-                }
-
+                    var modId = ((string)a.ConstructorArguments.First().Value).ToLower();
+                    var mod = LoadedModManager.RunningMods.FirstOrDefault(m => m.PackageId.NoModIdSuffix() == modId);
+                    return mod != null;
+                });
+                
                 if (!anyMod)
                     asm.MainModule.Types.Remove(t);
             }
@@ -82,35 +61,24 @@ namespace Multiplayer.Compat
 
         static void InitCompatInAsm(Assembly asm)
         {
-            var compatEntries = asm.GetTypes()
+            var queue = asm.GetTypes()
                 .Where(t => t.HasAttribute<MpCompatForAttribute>())
                 .SelectMany(
                     t => (MpCompatForAttribute[]) t.GetCustomAttributes(typeof(MpCompatForAttribute), false),
                     (type, compat) => new { type, compat }
                 )
-                .ToArray();
-
-            foreach (var entry in compatEntries)
-                Log.Message($"MPCompat :: Compat discovered {entry.type.FullName} in {asm.GetName().Name} for {entry.compat.PackageId} -> {NormalizeModId(entry.compat.PackageId)}");
-
-            var queue = compatEntries
                 .Join(LoadedModManager.RunningMods,
-                    box => NormalizeModId(box.compat.PackageId),
-                    mod => NormalizeModId(mod.PackageId),
-                    (box, mod) => new { box.type, box.compat, mod })
-                .ToArray();
-
-            foreach (var entry in compatEntries.Where(entry => !queue.Any(match => match.type == entry.type && match.compat == entry.compat)))
-                Log.Message($"MPCompat :: Compat no match {entry.type.FullName} for {entry.compat.PackageId} -> {NormalizeModId(entry.compat.PackageId)}");
+                    box => box.compat.PackageId.ToLower(),
+                    mod => mod.PackageId.NoModIdSuffix(),
+                    (box, mod) => new { box.type, mod });
 
             foreach (var action in queue) 
             {
                 try {
-                    Log.Message($"MPCompat :: Compat match {action.type.FullName} <- {action.mod.PackageId}");
                     Activator.CreateInstance(action.type, action.mod);
-                    Log.Message($"MPCompat :: Compat init ok {action.type.FullName} for {action.mod.PackageId}");
+                    Log.Message($"MPCompat :: Initialized compatibility for {action.mod.PackageId}");
                 } catch(Exception e) {
-                    Log.Error($"MPCompat :: Exception loading {action.type.FullName} for {action.mod.PackageId}: {e.InnerException ?? e}");
+                    Log.Error($"MPCompat :: Exception loading {action.mod.PackageId}: {e.InnerException ?? e}");
                 }
             }
         }
