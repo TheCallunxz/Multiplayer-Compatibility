@@ -28,6 +28,7 @@ namespace Multiplayer.Compat
         private static FastInvokeHandler transferableAdjustTo;
         private static FastInvokeHandler setAllowedMountedJob;
         private static FastInvokeHandler getMountedAnimalFromExtendedPawnData;
+        private static JobDef mountedJobDef;
 
         private static Pawn bypassMountedAnimalStartJobPawn;
         private static readonly Dictionary<Pawn, Pawn> pendingFlyerRidersByAnimal = [];
@@ -189,12 +190,12 @@ namespace Multiplayer.Compat
 
             bypassMountedAnimalStartJobPawn = __instance.pawn;
             PreserveMountedPair(rider, __instance.pawn);
+            LogDebug($"PreStartJob preserve: animal={DescribePawn(__instance.pawn)} rider={DescribePawn(rider)} curJob={DescribeJob(__instance.curJob)} newJob={DescribeJob(newJob)} drafted={__instance.pawn?.Drafted} playerForced={newJob?.playerForced} queue={DescribeQueuedJobs(__instance)}");
 
             if (IsDragonFlyAbility(newJob))
                 pendingFlyerRidersByAnimal[__instance.pawn] = rider;
 
-            if (__instance.curJob?.def?.defName == MountedJobDefName)
-                __instance.jobQueue.EnqueueFirst(new Job(__instance.curJob.def, rider) { count = 1 });
+            EnsureQueuedMountedJob(__instance, rider, "PreStartJob");
         }
 
         [MpCompatFinalizer(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.StartJob))]
@@ -212,7 +213,20 @@ namespace Multiplayer.Compat
             if (bypassMountedAnimalStartJobPawn != __instance?.pawn)
                 return true;
 
+            LogDebug($"Bypassing GiddyUp Patch_StartJob block for {DescribePawn(__instance.pawn)}");
             __result = true;
+            return false;
+        }
+
+        [MpCompatPrefix("GiddyUp.Harmony.Patch_DetermineNextJob", "Postfix")]
+        private static bool PreGiddyUpDetermineNextJobPostfix(Pawn_JobTracker __instance, ref ThinkResult __result)
+        {
+            var rider = __instance?.pawn;
+            if (!ShouldSkipGiddyUpMountedSanity(__instance, rider, out var mountedAnimal, out var reason))
+                return true;
+
+            EnsureQueuedMountedJob(mountedAnimal?.jobs, rider, "DetermineNextJob");
+            LogDebug($"Skipping GiddyUp mounted sanity: rider={DescribePawn(rider)} mount={DescribePawn(mountedAnimal)} riderJob={DescribeJob(rider?.CurJob)} mountJob={DescribeJob(mountedAnimal?.CurJob)} queuedMounted={HasQueuedMountedJob(mountedAnimal?.jobs, rider)} reason={reason} queue={DescribeQueuedJobs(mountedAnimal?.jobs)}");
             return false;
         }
 
@@ -221,11 +235,14 @@ namespace Multiplayer.Compat
         {
             if (clearReservation && animal != null)
             {
+                LogDebug($"Allowing explicit dismount: rider={DescribePawn(rider)} animal={DescribePawn(animal)} clearReservation={clearReservation}");
                 ClearPreservedMountedPair(rider, animal);
                 return true;
             }
 
-            return !ShouldSuppressForcedDismount(rider, animal);
+            var suppress = ShouldSuppressForcedDismount(rider, animal);
+            LogDebug($"Dismount intercept: rider={DescribePawn(rider)} animal={DescribePawn(animal)} clearReservation={clearReservation} suppress={suppress}");
+            return !suppress;
         }
 
         [MpCompatPrefix("GiddyUp.Harmony.Pawn_JobTracker_Notify_MasterDraftedOrUndrafted", "Prefix")]
@@ -234,6 +251,7 @@ namespace Multiplayer.Compat
             if (!ShouldSuppressMasterDraftedOrUndrafted(__instance?.pawn))
                 return true;
 
+            LogDebug($"Suppressing Notify_MasterDraftedOrUndrafted for {DescribePawn(__instance.pawn)} because preserved mounted pair is still valid");
             __result = false;
             return false;
         }
@@ -386,6 +404,7 @@ namespace Multiplayer.Compat
             if (jobTracker.curJob?.def?.defName == MountedJobDefName)
             {
                 rider = jobTracker.curJob.GetTarget(TargetIndex.A).Pawn;
+                LogDebug($"TryGetMountedAnimalRider from current Mounted job: animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)}");
                 return rider != null;
             }
 
@@ -393,8 +412,12 @@ namespace Multiplayer.Compat
                 return false;
 
             if (GetMountedAnimal(rider) == mountedAnimal)
+            {
+                LogDebug($"TryGetMountedAnimalRider from preserved pair: animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)} mountJob={DescribeJob(mountedAnimal.CurJob)} queuedMounted={HasQueuedMountedJob(mountedAnimal.jobs, rider)} queue={DescribeQueuedJobs(mountedAnimal.jobs)}");
                 return true;
+            }
 
+            LogDebug($"TryGetMountedAnimalRider clearing stale preserved pair: animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)} riderMount={DescribePawn(GetMountedAnimal(rider))}");
             ClearPreservedMountedPair(rider, mountedAnimal);
             rider = null;
             return false;
@@ -407,12 +430,14 @@ namespace Multiplayer.Compat
 
             if (animal != null && animal != preservedAnimal)
             {
+                LogDebug($"Not suppressing dismount because animal changed: rider={DescribePawn(rider)} requestedAnimal={DescribePawn(animal)} preservedAnimal={DescribePawn(preservedAnimal)}");
                 ClearPreservedMountedPair(rider, preservedAnimal);
                 return false;
             }
 
             if (!ShouldKeepMountedPairPreserved(rider, preservedAnimal))
             {
+                LogDebug($"Not suppressing dismount because preserved pair is no longer valid: rider={DescribePawn(rider)} animal={DescribePawn(preservedAnimal)} riderJob={DescribeJob(rider.CurJob)} animalJob={DescribeJob(preservedAnimal.CurJob)} queuedMounted={HasQueuedMountedJob(preservedAnimal.jobs, rider)} queue={DescribeQueuedJobs(preservedAnimal.jobs)}");
                 ClearPreservedMountedPair(rider, preservedAnimal);
                 return false;
             }
@@ -430,19 +455,35 @@ namespace Multiplayer.Compat
         private static bool ShouldKeepMountedPairPreserved(Pawn rider, Pawn mountedAnimal)
         {
             if (rider == null || mountedAnimal == null || rider.Destroyed || mountedAnimal.Destroyed)
+            {
+                LogDebug($"Preserved pair invalid: destroyed/null rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)}");
                 return false;
+            }
 
             if (rider.Dead || mountedAnimal.Dead || rider.Downed || mountedAnimal.Downed)
+            {
+                LogDebug($"Preserved pair invalid: dead/downed rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)}");
                 return false;
+            }
 
             if (rider.CurJobDef?.defName == DismountJobDefName || mountedAnimal.CurJobDef?.defName == DismountJobDefName)
+            {
+                LogDebug($"Preserved pair invalid: dismount job active rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)} riderJob={DescribeJob(rider.CurJob)} animalJob={DescribeJob(mountedAnimal.CurJob)}");
                 return false;
+            }
 
             if (mountedAnimal.Faction != rider.Faction || GetMountedAnimal(rider) != mountedAnimal)
+            {
+                LogDebug($"Preserved pair invalid: faction/mount mismatch rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)} riderMount={DescribePawn(GetMountedAnimal(rider))}");
                 return false;
+            }
 
-            return IsApprovedMountedTransientJob(mountedAnimal, mountedAnimal.CurJob) ||
-                   IsApprovedMountedTransientJob(mountedAnimal, rider.CurJob);
+            var keep = IsApprovedMountedTransientJob(mountedAnimal, mountedAnimal.CurJob) ||
+                       IsApprovedMountedTransientJob(mountedAnimal, rider.CurJob) ||
+                       HasQueuedMountedJob(mountedAnimal.jobs, rider);
+
+            LogDebug($"Preserved pair evaluation: keep={keep} rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)} riderJob={DescribeJob(rider.CurJob)} animalJob={DescribeJob(mountedAnimal.CurJob)} queuedMounted={HasQueuedMountedJob(mountedAnimal.jobs, rider)} queue={DescribeQueuedJobs(mountedAnimal.jobs)}");
+            return keep;
         }
 
         private static Pawn GetMountedAnimal(Pawn rider)
@@ -464,10 +505,14 @@ namespace Multiplayer.Compat
 
             preservedMountedAnimalsByRider[rider] = animal;
             preservedMountedRidersByAnimal[animal] = rider;
+            LogDebug($"Preserved mounted pair: rider={DescribePawn(rider)} animal={DescribePawn(animal)} riderJob={DescribeJob(rider.CurJob)} animalJob={DescribeJob(animal.CurJob)}");
         }
 
         private static void ClearPreservedMountedPair(Pawn rider, Pawn animal)
         {
+            var originalRider = rider;
+            var originalAnimal = animal;
+
             if (rider != null && preservedMountedAnimalsByRider.TryGetValue(rider, out var trackedAnimal))
             {
                 preservedMountedAnimalsByRider.Remove(rider);
@@ -483,7 +528,120 @@ namespace Multiplayer.Compat
             if (rider == null && trackedRider != null &&
                 preservedMountedAnimalsByRider.TryGetValue(trackedRider, out var reverseAnimal) && reverseAnimal == animal)
                 preservedMountedAnimalsByRider.Remove(trackedRider);
+
+            LogDebug($"Cleared preserved mounted pair: requestedRider={DescribePawn(originalRider)} requestedAnimal={DescribePawn(originalAnimal)} finalAnimal={DescribePawn(animal)} trackedRider={DescribePawn(trackedRider)}");
         }
+
+        private static bool ShouldSkipGiddyUpMountedSanity(Pawn_JobTracker jobTracker, Pawn rider, out Pawn mountedAnimal, out string reason)
+        {
+            mountedAnimal = null;
+            reason = null;
+
+            if (rider?.Faction == null || rider.def?.race?.intelligence != Intelligence.Humanlike || !rider.IsColonist)
+                return false;
+
+            mountedAnimal = GetMountedAnimal(rider);
+            if (mountedAnimal == null)
+                return false;
+
+            if (!preservedMountedAnimalsByRider.TryGetValue(rider, out var preservedAnimal) || preservedAnimal != mountedAnimal)
+                return false;
+
+            if (mountedAnimal.CurJobDef?.defName == MountedJobDefName)
+                return false;
+
+            if (!ShouldKeepMountedPairPreserved(rider, mountedAnimal))
+                return false;
+
+            if (!HasQueuedMountedJob(mountedAnimal.jobs, rider))
+            {
+                EnsureQueuedMountedJob(jobTracker, rider, "DetermineNextJobSanityRepair");
+                reason = "preserved pair valid; repaired missing queued Mounted";
+            }
+            else
+            {
+                reason = "preserved pair valid; queued Mounted already present";
+            }
+
+            return true;
+        }
+
+        private static bool EnsureQueuedMountedJob(Pawn_JobTracker jobs, Pawn rider, string context)
+        {
+            var mountedAnimal = jobs?.pawn;
+            if (mountedAnimal == null || rider == null)
+                return false;
+
+            if (mountedAnimal.CurJobDef?.defName == MountedJobDefName)
+            {
+                LogDebug($"Mounted queue already satisfied by current job: context={context} animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)}");
+                return false;
+            }
+
+            if (HasQueuedMountedJob(jobs, rider))
+            {
+                LogDebug($"Mounted queue already present: context={context} animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)}");
+                return false;
+            }
+
+            var mountedJob = mountedJobDef ??= DefDatabase<JobDef>.GetNamedSilentFail(MountedJobDefName);
+            if (mountedJob == null)
+            {
+                LogDebug($"Failed to queue Mounted job: context={context} animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)} because JobDef was null");
+                return false;
+            }
+
+            jobs.jobQueue.EnqueueFirst(new Job(mountedJob, rider) { count = 1 });
+            LogDebug($"Queued fallback Mounted job: context={context} animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)} riderJob={DescribeJob(rider.CurJob)} animalJob={DescribeJob(mountedAnimal.CurJob)} queue={DescribeQueuedJobs(jobs)}");
+            return true;
+        }
+
+        private static bool HasQueuedMountedJob(Pawn_JobTracker jobs, Pawn rider)
+        {
+            if (jobs?.jobQueue == null || rider == null)
+                return false;
+
+            foreach (QueuedJob queuedJob in jobs.jobQueue)
+            {
+                var job = queuedJob.job;
+                if (job?.def?.defName != MountedJobDefName)
+                    continue;
+
+                if (job.GetTarget(TargetIndex.A).Pawn == rider)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private static string DescribePawn(Pawn pawn)
+            => pawn == null ? "null" : $"{pawn.LabelShortCap}#{pawn.thingIDNumber}";
+
+        private static string DescribeJob(Job job)
+        {
+            if (job == null)
+                return "null";
+
+            var targetPawn = job.GetTarget(TargetIndex.A).Pawn;
+            return $"{job.def?.defName ?? "null"}(target={DescribePawn(targetPawn)}, ability={job.ability?.GetType().FullName ?? "null"}, playerForced={job.playerForced})";
+        }
+
+        private static string DescribeQueuedJobs(Pawn_JobTracker jobs)
+        {
+            if (jobs?.jobQueue == null)
+                return "[]";
+
+            var parts = new List<string>();
+            foreach (QueuedJob queuedJob in jobs.jobQueue)
+            {
+                parts.Add(DescribeJob(queuedJob.job));
+            }
+
+            return "[" + string.Join(", ", parts) + "]";
+        }
+
+        private static void LogDebug(string message)
+            => Log.Message($"[MPCompat:GiddyUp2] {message}");
 
         private static bool IsDragonMount(Pawn pawn)
         {
