@@ -31,6 +31,7 @@ namespace Multiplayer.Compat
         // fallback needed for DD dragon abilities.
         private static AccessTools.FieldRef<object, Pawn> vefAbilityPawnField;
         private static AccessTools.FieldRef<object, Thing> vefAbilityHolderField;
+        private static AccessTools.FieldRef<object, object> vefAbilityDefField;
         private static FastInvokeHandler vefAbilityInitMethod;
 
         // VEF CompAbilities / CompAbilitiesApparel — needed to handle non-DD VEF abilities
@@ -115,6 +116,7 @@ namespace Multiplayer.Compat
             {
                 vefAbilityPawnField   = AccessTools.FieldRefAccess<Pawn>(vefAbilityType, "pawn");
                 vefAbilityHolderField = AccessTools.FieldRefAccess<Thing>(vefAbilityType, "holder");
+                vefAbilityDefField    = AccessTools.FieldRefAccess<object>(vefAbilityType, "def");
                 vefAbilityInitMethod  = MethodInvoker.GetHandler(AccessTools.Method(vefAbilityType, "Init"));
 
                 vefCompAbilitiesType = AccessTools.TypeByName("VEF.Abilities.CompAbilities");
@@ -176,7 +178,7 @@ namespace Multiplayer.Compat
                 // (where holder may be null or set to the pawn which has no CompAbilities).
                 sync.Write(vefAbilityHolderField(source));
                 sync.Write(vefAbilityPawnField(source));
-                sync.Write(((Ability)source).def.defName);
+                sync.Write(GetVEFAbilityDefName(source));
             }
             else
             {
@@ -195,7 +197,7 @@ namespace Multiplayer.Compat
                         {
                             foreach (var o in vefLearnedAbilitiesField(comp))
                             {
-                                if (o is Ability a && a.def.defName == defName && o is ITargetingSource its)
+                                if (o is ITargetingSource its && GetVEFAbilityDefName(o) == defName)
                                 {
                                     source = its;
                                     return;
@@ -212,7 +214,7 @@ namespace Multiplayer.Compat
                         {
                             foreach (var o in vefGivenAbilitiesField(apparelComp))
                             {
-                                if (o is Ability a && a.def.defName == defName && o is ITargetingSource its)
+                                if (o is ITargetingSource its && GetVEFAbilityDefName(o) == defName)
                                 {
                                     // Replicate VEF's apparel-ability initialization so the
                                     // ability knows its owning pawn on non-host clients.
@@ -245,6 +247,9 @@ namespace Multiplayer.Compat
                 Log.Error($"MPCompat :: DragonsDescent: Could not find ability '{defName}' (holder={holder}, pawn={pawn}). Desync is likely on this client.");
             }
         }
+
+        private static string GetVEFAbilityDefName(object ability)
+            => (vefAbilityDefField?.Invoke(ability) as Def)?.defName;
 
         private static void SyncRitualTracker(SyncWorker sync, ref object tracker)
         {

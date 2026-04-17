@@ -2,6 +2,7 @@
 using Multiplayer.API;
 using RimWorld;
 using Verse;
+using Verse.AI;
 
 namespace Multiplayer.Compat
 {
@@ -12,6 +13,8 @@ namespace Multiplayer.Compat
     [MpCompatFor("MemeGoddess.GiddyUp")]
     public class GiddyUp2
     {
+        private const string WaitForRiderJobDriver = "GiddyUpRideAndRoll.Jobs.JobDriver_WaitForRider";
+
         // Multiplayer
         private static FastInvokeHandler transferableAdjustTo;
 
@@ -29,6 +32,8 @@ namespace Multiplayer.Compat
 
         public GiddyUp2(ModContentPack mod)
         {
+            MpCompatPatchLoader.LoadPatch<GiddyUp2>();
+
             // Gizmos
             {
                 // Release animals
@@ -126,6 +131,55 @@ namespace Multiplayer.Compat
                 designatorSelectedArea(designator) = sync.Read<Area>();
                 designatorAreaLabel(designator) = sync.Read<string>();
             }
+        }
+
+        [MpCompatPrefix("GiddyUp.MountUtility", "FindPlaceToDismount")]
+        private static void PreFindPlaceToDismount(Pawn rider, IntVec3 riderDestination, out bool __state)
+        {
+            __state = MP.IsInMultiplayer;
+
+            if (!__state)
+                return;
+
+            Rand.PushState(GetStableRandSeed(rider, riderDestination.GetHashCode()));
+        }
+
+        [MpCompatFinalizer("GiddyUp.MountUtility", "FindPlaceToDismount")]
+        private static void PostFindPlaceToDismount(bool __state)
+        {
+            if (__state)
+                Rand.PopState();
+        }
+
+        [MpCompatPrefix(typeof(JobDriver), nameof(JobDriver.DriverTick))]
+        private static void PreDriverTick(JobDriver __instance, out bool __state)
+        {
+            __state = MP.IsInMultiplayer && __instance?.GetType().FullName == WaitForRiderJobDriver;
+
+            if (!__state)
+                return;
+
+            Rand.PushState(GetStableRandSeed(__instance.pawn));
+        }
+
+        [MpCompatFinalizer(typeof(JobDriver), nameof(JobDriver.DriverTick))]
+        private static void PostDriverTick(bool __state)
+        {
+            if (__state)
+                Rand.PopState();
+        }
+
+        private static int GetStableRandSeed(Pawn pawn, int extraSeed = 0)
+        {
+            var seed = Find.TickManager.TicksGame;
+
+            if (pawn != null)
+                seed = Gen.HashCombineInt(seed, pawn.thingIDNumber);
+
+            if (extraSeed != 0)
+                seed = Gen.HashCombineInt(seed, extraSeed);
+
+            return seed;
         }
     }
 }
