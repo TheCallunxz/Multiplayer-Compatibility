@@ -379,13 +379,8 @@ namespace Multiplayer.Compat
             return abilityType == DragonJumpAbilityType || abilityType == WingedFlyerAbilityType;
         }
 
-        private static bool IsMountedDragonControlJob(Pawn mountedAnimal, Job job)
-        {
-            if (!IsDragonMount(mountedAnimal))
-                return false;
-
-            return mountedAnimal.Drafted || job.playerForced;
-        }
+        private static bool IsMountedAnimalControlJob(Pawn mountedAnimal, Job job)
+            => mountedAnimal != null && job != null && (mountedAnimal.Drafted || job.playerForced);
 
         private static bool ShouldPreserveMountedAnimalForJob(Pawn mountedAnimal, Pawn rider, Job job)
         {
@@ -397,7 +392,7 @@ namespace Multiplayer.Compat
 
         private static bool IsApprovedMountedTransientJob(Pawn mountedAnimal, Job job)
         {
-            return job != null && (IsAbilityJob(job) || IsMountedDragonControlJob(mountedAnimal, job));
+            return job != null && (IsAbilityJob(job) || IsMountedAnimalControlJob(mountedAnimal, job));
         }
 
         private static bool TryGetMountedAnimalRider(Pawn_JobTracker jobTracker, out Pawn rider)
@@ -432,8 +427,14 @@ namespace Multiplayer.Compat
 
         private static bool ShouldSuppressForcedDismount(Pawn rider, Pawn animal)
         {
-            if (rider == null || !preservedMountedAnimalsByRider.TryGetValue(rider, out var preservedAnimal))
+            if (!TryGetActiveMountedPair(rider, animal, out var preservedAnimal, out var recoveredPreservedState))
+            {
+                LogDebug($"Not suppressing dismount because no active mounted pair was found: rider={DescribePawn(rider)} animal={DescribePawn(animal)}");
                 return false;
+            }
+
+            if (recoveredPreservedState)
+                LogDebug($"Recovered preserved mounted pair during dismount intercept: rider={DescribePawn(rider)} animal={DescribePawn(preservedAnimal)} queue={DescribeQueuedJobs(preservedAnimal?.jobs)}");
 
             if (animal != null && animal != preservedAnimal)
             {
@@ -545,20 +546,31 @@ namespace Multiplayer.Compat
             reason = null;
 
             if (rider?.Faction == null || rider.def?.race?.intelligence != Intelligence.Humanlike || !rider.IsColonist)
+            {
+                reason = "rider missing/factionless/not humanlike colonist";
                 return false;
+            }
 
-            mountedAnimal = GetMountedAnimal(rider);
-            if (mountedAnimal == null)
+            if (!TryGetActiveMountedPair(rider, null, out mountedAnimal, out var recoveredPreservedState))
+            {
+                reason = "no active mounted pair";
                 return false;
+            }
 
-            if (!preservedMountedAnimalsByRider.TryGetValue(rider, out var preservedAnimal) || preservedAnimal != mountedAnimal)
-                return false;
+            if (recoveredPreservedState)
+                LogDebug($"Recovered preserved mounted pair during sanity check: rider={DescribePawn(rider)} animal={DescribePawn(mountedAnimal)} queue={DescribeQueuedJobs(mountedAnimal?.jobs)}");
 
             if (mountedAnimal.CurJobDef?.defName == MountedJobDefName)
+            {
+                reason = "mount already on Mounted job";
                 return false;
+            }
 
             if (!ShouldKeepMountedPairPreserved(rider, mountedAnimal))
+            {
+                reason = "mounted pair no longer valid for preservation";
                 return false;
+            }
 
             if (!HasQueuedMountedJob(mountedAnimal.jobs, rider))
             {
@@ -568,6 +580,40 @@ namespace Multiplayer.Compat
             else
             {
                 reason = "preserved pair valid; queued Mounted already present";
+            }
+
+            return true;
+        }
+
+        private static bool TryGetActiveMountedPair(Pawn rider, Pawn animalHint, out Pawn mountedAnimal, out bool recoveredPreservedState)
+        {
+            mountedAnimal = null;
+            recoveredPreservedState = false;
+
+            if (rider == null)
+                return false;
+
+            if (animalHint != null)
+                mountedAnimal = animalHint;
+            else if (preservedMountedAnimalsByRider.TryGetValue(rider, out var preservedAnimal))
+                mountedAnimal = preservedAnimal;
+            else
+                mountedAnimal = GetMountedAnimal(rider);
+
+            if (mountedAnimal == null)
+                return false;
+
+            var riderMount = GetMountedAnimal(rider);
+            if (riderMount != null && riderMount != mountedAnimal)
+            {
+                LogDebug($"Active mount mismatch: rider={DescribePawn(rider)} hintedAnimal={DescribePawn(mountedAnimal)} riderMount={DescribePawn(riderMount)}");
+                return false;
+            }
+
+            if (!preservedMountedAnimalsByRider.TryGetValue(rider, out var trackedAnimal) || trackedAnimal != mountedAnimal)
+            {
+                PreserveMountedPair(rider, mountedAnimal);
+                recoveredPreservedState = true;
             }
 
             return true;
