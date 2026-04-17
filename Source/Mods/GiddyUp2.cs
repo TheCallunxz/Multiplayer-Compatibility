@@ -362,7 +362,13 @@ namespace Multiplayer.Compat
             if (mountedAnimal == null || newJob == null || !TryGetMountedAnimalRider(jobTracker, out rider))
                 return false;
 
-            return ShouldPreserveMountedAnimalForJob(mountedAnimal, rider, newJob);
+            var shouldPreserve = ShouldPreserveMountedAnimalForJob(mountedAnimal, rider, newJob);
+            if (!shouldPreserve)
+            {
+                LogDebug($"Skipping mounted preservation: animal={DescribePawn(mountedAnimal)} rider={DescribePawn(rider)} newJob={DescribeJob(newJob)} drafted={mountedAnimal.Drafted} playerForced={newJob.playerForced}");
+            }
+
+            return shouldPreserve;
         }
 
         private static bool IsAbilityJob(Job job)
@@ -381,9 +387,6 @@ namespace Multiplayer.Compat
             return abilityType == DragonJumpAbilityType || abilityType == WingedFlyerAbilityType;
         }
 
-        private static bool IsMountedAnimalControlJob(Pawn mountedAnimal, Job job)
-            => mountedAnimal != null && job != null && (mountedAnimal.Drafted || job.playerForced);
-
         private static bool ShouldPreserveMountedAnimalForJob(Pawn mountedAnimal, Pawn rider, Job job)
         {
             if (mountedAnimal == null || rider == null || job == null)
@@ -394,7 +397,7 @@ namespace Multiplayer.Compat
 
         private static bool IsApprovedMountedTransientJob(Pawn mountedAnimal, Job job)
         {
-            return job != null && (IsAbilityJob(job) || IsMountedAnimalControlJob(mountedAnimal, job));
+            return job != null && IsAbilityJob(job) && !IsDragonFlyAbility(job);
         }
 
         private static bool TryGetMountedAnimalRider(Pawn_JobTracker jobTracker, out Pawn rider)
