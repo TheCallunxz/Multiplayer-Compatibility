@@ -1,4 +1,5 @@
-﻿using HarmonyLib;
+﻿using System.Collections.Generic;
+using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
 using Verse;
@@ -14,9 +15,27 @@ namespace Multiplayer.Compat
     public class GiddyUp2
     {
         private const string WaitForRiderJobDriver = "GiddyUpRideAndRoll.Jobs.JobDriver_WaitForRider";
+        private const string MountedJobDefName = "Mounted";
+        private const string DragonJumpAbilityType = "DD.Ability_DragonJump";
+        private const string DragonJumpFlyerType = "DD.AbilityDragonStraightPawnFlyer";
+        private const string WingedFlyerAbilityType = "DD.Ability_WingedFlyer";
+        private const string WingedFlyerType = "DD.WingedFlyer";
 
         // Multiplayer
         private static FastInvokeHandler transferableAdjustTo;
+        private static FastInvokeHandler setAllowedMountedJob;
+
+        private static Pawn bypassMountedAnimalStartJobPawn;
+        private static Pawn preserveMountedAnimalDuringAbility;
+        private static Pawn preserveMountedRiderDuringAbility;
+        private static readonly Dictionary<Pawn, Pawn> pendingFlyerRidersByAnimal = [];
+
+        private sealed class MountedAbilityStartState
+        {
+            public Pawn PreviousBypassPawn;
+            public Pawn PreviousPreservedAnimal;
+            public Pawn PreviousPreservedRider;
+        }
 
         // ExtendedPawnData/ExtendedDataStorage
         private static AccessTools.FieldRef<object, Pawn> extendedPawnDataPawn;
@@ -91,6 +110,10 @@ namespace Multiplayer.Compat
                 // Designator_GU has an argument for the constructor which would fail with shouldConstruct, but it's only
                 // used by the subclasses which have parameterless ones (they provide the argument themselves).
                 MP.RegisterSyncWorker<Designator>(SyncGiddyUpDesignator, type, isImplicit: true, shouldConstruct: true);
+
+                type = AccessTools.TypeByName("GiddyUp.Jobs.JobDriver_Mounted");
+                setAllowedMountedJob = MethodInvoker.GetHandler(AccessTools.DeclaredMethod(type, "SetAllowedJob"));
+                setAllowedMountedJob(null, JobDefOf.UseVerbOnThing, true);
             }
         }
 
@@ -131,6 +154,98 @@ namespace Multiplayer.Compat
                 designatorSelectedArea(designator) = sync.Read<Area>();
                 designatorAreaLabel(designator) = sync.Read<string>();
             }
+        }
+
+        [MpCompatPrefix(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.StartJob))]
+        private static void PreStartJob(Pawn_JobTracker __instance, Job newJob, out MountedAbilityStartState __state)
+        {
+            __state = null;
+
+            if (!ShouldPreserveMountedAnimalForAbility(__instance, newJob, out var rider))
+                return;
+
+            __state = new MountedAbilityStartState
+            {
+                PreviousBypassPawn = bypassMountedAnimalStartJobPawn,
+                PreviousPreservedAnimal = preserveMountedAnimalDuringAbility,
+                PreviousPreservedRider = preserveMountedRiderDuringAbility,
+            };
+
+            bypassMountedAnimalStartJobPawn = __instance.pawn;
+            preserveMountedAnimalDuringAbility = __instance.pawn;
+            preserveMountedRiderDuringAbility = rider;
+
+            if (IsDragonFlyAbility(newJob))
+                pendingFlyerRidersByAnimal[__instance.pawn] = rider;
+
+            __instance.jobQueue.EnqueueFirst(new Job(__instance.curJob.def, rider) { count = 1 });
+        }
+
+        [MpCompatFinalizer(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.StartJob))]
+        private static void PostStartJob(MountedAbilityStartState __state)
+        {
+            if (__state == null)
+                return;
+
+            bypassMountedAnimalStartJobPawn = __state.PreviousBypassPawn;
+            preserveMountedAnimalDuringAbility = __state.PreviousPreservedAnimal;
+            preserveMountedRiderDuringAbility = __state.PreviousPreservedRider;
+        }
+
+        [MpCompatPrefix("GiddyUp.Harmony.Patch_StartJob", "Prefix")]
+        private static bool PreGiddyUpPatchStartJob(Pawn_JobTracker __instance, ref bool __result)
+        {
+            if (bypassMountedAnimalStartJobPawn != __instance?.pawn)
+                return true;
+
+            __result = true;
+            return false;
+        }
+
+        [MpCompatPrefix("GiddyUp.MountUtility", "Dismount")]
+        private static bool PreDismountForAbility(Pawn rider, Pawn animal)
+        {
+            return rider != preserveMountedRiderDuringAbility || animal != preserveMountedAnimalDuringAbility;
+        }
+
+        [MpCompatPostfix(WingedFlyerType, "MakeFlyer")]
+        private static void PostWingedFlyerMakeFlyer(Pawn pawn, object __result)
+        {
+            TryAttachPendingFlyerRider(pawn, __result);
+        }
+
+        [MpCompatPostfix(typeof(PawnFlyer), nameof(PawnFlyer.MakeFlyer))]
+        private static void PostPawnFlyerMakeFlyer(Pawn pawn, PawnFlyer __result)
+        {
+            if (__result?.GetType().FullName == DragonJumpFlyerType)
+                TryAttachPendingFlyerRider(pawn, __result);
+        }
+
+        [MpCompatPrefix(WingedFlyerType, "RespawnPawn")]
+        private static void PreWingedFlyerRespawn(object __instance, out List<Pawn> __state)
+        {
+            __state = DetachAdditionalHeldPawns(__instance);
+        }
+
+        [MpCompatFinalizer(WingedFlyerType, "RespawnPawn")]
+        private static void PostWingedFlyerRespawn(object __instance, List<Pawn> __state)
+        {
+            RespawnDetachedPawns(__instance, __state);
+        }
+
+        [MpCompatPrefix(typeof(PawnFlyer), "RespawnPawn")]
+        private static void PrePawnFlyerRespawn(PawnFlyer __instance, out List<Pawn> __state)
+        {
+            __state = __instance?.GetType().FullName == DragonJumpFlyerType
+                ? DetachAdditionalHeldPawns(__instance)
+                : null;
+        }
+
+        [MpCompatFinalizer(typeof(PawnFlyer), "RespawnPawn")]
+        private static void PostPawnFlyerRespawn(PawnFlyer __instance, List<Pawn> __state)
+        {
+            if (__instance?.GetType().FullName == DragonJumpFlyerType)
+                RespawnDetachedPawns(__instance, __state);
         }
 
         [MpCompatPrefix("GiddyUp.MountUtility", "FindPlaceToDismount")]
@@ -180,6 +295,111 @@ namespace Multiplayer.Compat
                 seed = Gen.HashCombineInt(seed, extraSeed);
 
             return seed;
+        }
+
+        private static bool ShouldPreserveMountedAnimalForAbility(Pawn_JobTracker jobTracker, Job newJob, out Pawn rider)
+        {
+            rider = null;
+
+            if (jobTracker?.pawn == null || jobTracker.curJob?.def?.defName != MountedJobDefName)
+                return false;
+
+            rider = jobTracker.curJob.GetTarget(TargetIndex.A).Pawn;
+            if (rider == null || !IsAbilityJob(newJob))
+                return false;
+
+            return true;
+        }
+
+        private static bool IsAbilityJob(Job job)
+        {
+            if (job == null)
+                return false;
+
+            return job.ability != null || job.verbToUse is Verb_CastAbility;
+        }
+
+        private static bool IsDragonFlyAbility(Job job)
+        {
+            var ability = job?.ability ?? (job?.verbToUse as Verb_CastAbility)?.ability;
+            var abilityType = ability?.GetType().FullName;
+
+            return abilityType == DragonJumpAbilityType || abilityType == WingedFlyerAbilityType;
+        }
+
+        private static void TryAttachPendingFlyerRider(Pawn animal, object flyer)
+        {
+            if (animal == null)
+                return;
+
+            if (!pendingFlyerRidersByAnimal.TryGetValue(animal, out var rider))
+                return;
+
+            pendingFlyerRidersByAnimal.Remove(animal);
+
+            if (flyer is not IThingHolder holder)
+                return;
+
+            if (rider == null || rider.Destroyed)
+                return;
+
+            if (rider.Spawned)
+                rider.DeSpawn();
+
+            holder.GetDirectlyHeldThings().TryAddOrTransfer(rider, canMergeWithExistingStacks: true);
+        }
+
+        private static List<Pawn> DetachAdditionalHeldPawns(object flyer)
+        {
+            if (flyer is not IThingHolder holder)
+                return null;
+
+            var heldThings = holder.GetDirectlyHeldThings();
+            List<Pawn> detachedPawns = null;
+            Pawn primaryPawn = null;
+
+            for (var i = 0; i < heldThings.Count; i++)
+            {
+                if (heldThings[i] is Pawn pawn)
+                {
+                    primaryPawn = pawn;
+                    break;
+                }
+            }
+
+            if (primaryPawn == null)
+                return null;
+
+            for (var i = heldThings.Count - 1; i >= 0; i--)
+            {
+                if (heldThings[i] is not Pawn pawn)
+                    continue;
+
+                if (pawn == primaryPawn)
+                    continue;
+
+                detachedPawns ??= [];
+                detachedPawns.Add(pawn);
+                heldThings.Remove(pawn);
+            }
+
+            detachedPawns?.Reverse();
+            return detachedPawns;
+        }
+
+        private static void RespawnDetachedPawns(object flyer, List<Pawn> detachedPawns)
+        {
+            if (detachedPawns == null || detachedPawns.Count == 0 || flyer is not Thing thing || thing.Map == null)
+                return;
+
+            for (var i = 0; i < detachedPawns.Count; i++)
+            {
+                var pawn = detachedPawns[i];
+                if (pawn == null || pawn.Destroyed)
+                    continue;
+
+                GenSpawn.Spawn(pawn, thing.Position, thing.Map);
+            }
         }
     }
 }
