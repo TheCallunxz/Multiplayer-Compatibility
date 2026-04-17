@@ -219,7 +219,7 @@ namespace Multiplayer.Compat
         }
 
         [MpCompatPrefix("GiddyUp.Harmony.Patch_DetermineNextJob", "Postfix")]
-        private static bool PreGiddyUpDetermineNextJobPostfix(Pawn_JobTracker __instance, ref ThinkResult __result)
+        private static bool PreGiddyUpDetermineNextJobPostfix(Pawn_JobTracker __instance)
         {
             var rider = __instance?.pawn;
             if (!ShouldSkipGiddyUpMountedSanity(__instance, rider, out var mountedAnimal, out var reason))
