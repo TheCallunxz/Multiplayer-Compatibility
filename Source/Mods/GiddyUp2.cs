@@ -15,26 +15,28 @@ namespace Multiplayer.Compat
     public class GiddyUp2
     {
         private const string WaitForRiderJobDriver = "GiddyUpRideAndRoll.Jobs.JobDriver_WaitForRider";
+        private const string DismountJobDefName = "Dismount";
         private const string MountedJobDefName = "Mounted";
         private const string DragonJumpAbilityType = "DD.Ability_DragonJump";
         private const string DragonJumpFlyerType = "DD.AbilityDragonStraightPawnFlyer";
+        private const string DragonGenusMarkerExtensionType = "DD.GenusMarkerExtension";
+        private const string DragonWingedFlyerExtensionType = "DD.WingedFlyerExtension";
         private const string WingedFlyerAbilityType = "DD.Ability_WingedFlyer";
         private const string WingedFlyerType = "DD.WingedFlyer";
 
         // Multiplayer
         private static FastInvokeHandler transferableAdjustTo;
         private static FastInvokeHandler setAllowedMountedJob;
+        private static FastInvokeHandler getMountedAnimalFromExtendedPawnData;
 
         private static Pawn bypassMountedAnimalStartJobPawn;
-        private static Pawn preserveMountedAnimalDuringAbility;
-        private static Pawn preserveMountedRiderDuringAbility;
         private static readonly Dictionary<Pawn, Pawn> pendingFlyerRidersByAnimal = [];
+        private static readonly Dictionary<Pawn, Pawn> preservedMountedAnimalsByRider = [];
+        private static readonly Dictionary<Pawn, Pawn> preservedMountedRidersByAnimal = [];
 
         private sealed class MountedAbilityStartState
         {
             public Pawn PreviousBypassPawn;
-            public Pawn PreviousPreservedAnimal;
-            public Pawn PreviousPreservedRider;
         }
 
         // ExtendedPawnData/ExtendedDataStorage
@@ -97,6 +99,7 @@ namespace Multiplayer.Compat
                 // ExtendedPawnData — field renamed from "pawn" to "_pawn"
                 var type = AccessTools.TypeByName("GiddyUp.ExtendedPawnData");
                 extendedPawnDataPawn = AccessTools.FieldRefAccess<Pawn>(type, "_pawn");
+                getMountedAnimalFromExtendedPawnData = MethodInvoker.GetHandler(AccessTools.PropertyGetter(type, "Mount"));
                 MP.RegisterSyncWorker<object>(SyncExtendedPawnData, type);
 
                 // Method renamed from GetGUData to GetExtendedPawnData
@@ -176,24 +179,22 @@ namespace Multiplayer.Compat
         {
             __state = null;
 
-            if (!ShouldPreserveMountedAnimalForAbility(__instance, newJob, out var rider))
+            if (!ShouldPreserveMountedAnimalStartJob(__instance, newJob, out var rider))
                 return;
 
             __state = new MountedAbilityStartState
             {
                 PreviousBypassPawn = bypassMountedAnimalStartJobPawn,
-                PreviousPreservedAnimal = preserveMountedAnimalDuringAbility,
-                PreviousPreservedRider = preserveMountedRiderDuringAbility,
             };
 
             bypassMountedAnimalStartJobPawn = __instance.pawn;
-            preserveMountedAnimalDuringAbility = __instance.pawn;
-            preserveMountedRiderDuringAbility = rider;
+            PreserveMountedPair(rider, __instance.pawn);
 
             if (IsDragonFlyAbility(newJob))
                 pendingFlyerRidersByAnimal[__instance.pawn] = rider;
 
-            __instance.jobQueue.EnqueueFirst(new Job(__instance.curJob.def, rider) { count = 1 });
+            if (__instance.curJob?.def?.defName == MountedJobDefName)
+                __instance.jobQueue.EnqueueFirst(new Job(__instance.curJob.def, rider) { count = 1 });
         }
 
         [MpCompatFinalizer(typeof(Pawn_JobTracker), nameof(Pawn_JobTracker.StartJob))]
@@ -203,8 +204,6 @@ namespace Multiplayer.Compat
                 return;
 
             bypassMountedAnimalStartJobPawn = __state.PreviousBypassPawn;
-            preserveMountedAnimalDuringAbility = __state.PreviousPreservedAnimal;
-            preserveMountedRiderDuringAbility = __state.PreviousPreservedRider;
         }
 
         [MpCompatPrefix("GiddyUp.Harmony.Patch_StartJob", "Prefix")]
@@ -218,9 +217,25 @@ namespace Multiplayer.Compat
         }
 
         [MpCompatPrefix("GiddyUp.MountUtility", "Dismount")]
-        private static bool PreDismountForAbility(Pawn rider, Pawn animal)
+        private static bool PreDismountForAbility(Pawn rider, Pawn animal, bool clearReservation)
         {
-            return rider != preserveMountedRiderDuringAbility || animal != preserveMountedAnimalDuringAbility;
+            if (clearReservation && animal != null)
+            {
+                ClearPreservedMountedPair(rider, animal);
+                return true;
+            }
+
+            return !ShouldSuppressForcedDismount(rider, animal);
+        }
+
+        [MpCompatPrefix("GiddyUp.Harmony.Pawn_JobTracker_Notify_MasterDraftedOrUndrafted", "Prefix")]
+        private static bool PreNotifyMasterDraftedOrUndrafted(Pawn_JobTracker __instance, ref bool __result)
+        {
+            if (!ShouldSuppressMasterDraftedOrUndrafted(__instance?.pawn))
+                return true;
+
+            __result = false;
+            return false;
         }
 
         [MpCompatPostfix(WingedFlyerType, "MakeFlyer")]
@@ -312,18 +327,15 @@ namespace Multiplayer.Compat
             return seed;
         }
 
-        private static bool ShouldPreserveMountedAnimalForAbility(Pawn_JobTracker jobTracker, Job newJob, out Pawn rider)
+        private static bool ShouldPreserveMountedAnimalStartJob(Pawn_JobTracker jobTracker, Job newJob, out Pawn rider)
         {
             rider = null;
 
-            if (jobTracker?.pawn == null || jobTracker.curJob?.def?.defName != MountedJobDefName)
+            var mountedAnimal = jobTracker?.pawn;
+            if (mountedAnimal == null || newJob == null || !TryGetMountedAnimalRider(jobTracker, out rider))
                 return false;
 
-            rider = jobTracker.curJob.GetTarget(TargetIndex.A).Pawn;
-            if (rider == null || !IsAbilityJob(newJob))
-                return false;
-
-            return true;
+            return ShouldPreserveMountedAnimalForJob(mountedAnimal, rider, newJob);
         }
 
         private static bool IsAbilityJob(Job job)
@@ -340,6 +352,158 @@ namespace Multiplayer.Compat
             var abilityType = ability?.GetType().FullName;
 
             return abilityType == DragonJumpAbilityType || abilityType == WingedFlyerAbilityType;
+        }
+
+        private static bool IsMountedDragonControlJob(Pawn mountedAnimal, Job job)
+        {
+            if (!IsDragonMount(mountedAnimal))
+                return false;
+
+            return mountedAnimal.Drafted || job.playerForced;
+        }
+
+        private static bool ShouldPreserveMountedAnimalForJob(Pawn mountedAnimal, Pawn rider, Job job)
+        {
+            if (mountedAnimal == null || rider == null || job == null)
+                return false;
+
+            return mountedAnimal == GetMountedAnimal(rider) && IsApprovedMountedTransientJob(mountedAnimal, job);
+        }
+
+        private static bool IsApprovedMountedTransientJob(Pawn mountedAnimal, Job job)
+        {
+            return job != null && (IsAbilityJob(job) || IsMountedDragonControlJob(mountedAnimal, job));
+        }
+
+        private static bool TryGetMountedAnimalRider(Pawn_JobTracker jobTracker, out Pawn rider)
+        {
+            rider = null;
+
+            var mountedAnimal = jobTracker?.pawn;
+            if (mountedAnimal == null)
+                return false;
+
+            if (jobTracker.curJob?.def?.defName == MountedJobDefName)
+            {
+                rider = jobTracker.curJob.GetTarget(TargetIndex.A).Pawn;
+                return rider != null;
+            }
+
+            if (!preservedMountedRidersByAnimal.TryGetValue(mountedAnimal, out rider))
+                return false;
+
+            if (GetMountedAnimal(rider) == mountedAnimal)
+                return true;
+
+            ClearPreservedMountedPair(rider, mountedAnimal);
+            rider = null;
+            return false;
+        }
+
+        private static bool ShouldSuppressForcedDismount(Pawn rider, Pawn animal)
+        {
+            if (rider == null || !preservedMountedAnimalsByRider.TryGetValue(rider, out var preservedAnimal))
+                return false;
+
+            if (animal != null && animal != preservedAnimal)
+            {
+                ClearPreservedMountedPair(rider, preservedAnimal);
+                return false;
+            }
+
+            if (!ShouldKeepMountedPairPreserved(rider, preservedAnimal))
+            {
+                ClearPreservedMountedPair(rider, preservedAnimal);
+                return false;
+            }
+
+            return true;
+        }
+
+        private static bool ShouldSuppressMasterDraftedOrUndrafted(Pawn mountedAnimal)
+        {
+            return mountedAnimal != null &&
+                   preservedMountedRidersByAnimal.TryGetValue(mountedAnimal, out var rider) &&
+                   ShouldKeepMountedPairPreserved(rider, mountedAnimal);
+        }
+
+        private static bool ShouldKeepMountedPairPreserved(Pawn rider, Pawn mountedAnimal)
+        {
+            if (rider == null || mountedAnimal == null || rider.Destroyed || mountedAnimal.Destroyed)
+                return false;
+
+            if (rider.Dead || mountedAnimal.Dead || rider.Downed || mountedAnimal.Downed)
+                return false;
+
+            if (rider.CurJobDef?.defName == DismountJobDefName || mountedAnimal.CurJobDef?.defName == DismountJobDefName)
+                return false;
+
+            if (mountedAnimal.Faction != rider.Faction || GetMountedAnimal(rider) != mountedAnimal)
+                return false;
+
+            return IsApprovedMountedTransientJob(mountedAnimal, mountedAnimal.CurJob) ||
+                   IsApprovedMountedTransientJob(mountedAnimal, rider.CurJob);
+        }
+
+        private static Pawn GetMountedAnimal(Pawn rider)
+        {
+            if (rider == null || getExtendedPawnData == null || getMountedAnimalFromExtendedPawnData == null)
+                return null;
+
+            var extendedPawnData = getExtendedPawnData(null, rider);
+            return extendedPawnData != null ? (Pawn)getMountedAnimalFromExtendedPawnData(extendedPawnData) : null;
+        }
+
+        private static void PreserveMountedPair(Pawn rider, Pawn animal)
+        {
+            if (rider == null || animal == null)
+                return;
+
+            ClearPreservedMountedPair(rider, null);
+            ClearPreservedMountedPair(null, animal);
+
+            preservedMountedAnimalsByRider[rider] = animal;
+            preservedMountedRidersByAnimal[animal] = rider;
+        }
+
+        private static void ClearPreservedMountedPair(Pawn rider, Pawn animal)
+        {
+            if (rider != null && preservedMountedAnimalsByRider.TryGetValue(rider, out var trackedAnimal))
+            {
+                preservedMountedAnimalsByRider.Remove(rider);
+                if (animal == null || trackedAnimal == animal)
+                    animal = trackedAnimal;
+            }
+
+            if (animal == null || !preservedMountedRidersByAnimal.TryGetValue(animal, out var trackedRider))
+                return;
+
+            preservedMountedRidersByAnimal.Remove(animal);
+
+            if (rider == null && trackedRider != null &&
+                preservedMountedAnimalsByRider.TryGetValue(trackedRider, out var reverseAnimal) && reverseAnimal == animal)
+                preservedMountedAnimalsByRider.Remove(trackedRider);
+        }
+
+        private static bool IsDragonMount(Pawn pawn)
+        {
+            return HasModExtension(pawn, DragonGenusMarkerExtensionType) ||
+                   HasModExtension(pawn, DragonWingedFlyerExtensionType);
+        }
+
+        private static bool HasModExtension(Pawn pawn, string extensionTypeName)
+        {
+            var modExtensions = pawn?.def?.modExtensions;
+            if (modExtensions == null)
+                return false;
+
+            for (var i = 0; i < modExtensions.Count; i++)
+            {
+                if (modExtensions[i]?.GetType().FullName == extensionTypeName)
+                    return true;
+            }
+
+            return false;
         }
 
         private static void TryAttachPendingFlyerRider(Pawn animal, object flyer)
