@@ -180,6 +180,9 @@ namespace Multiplayer.Compat
         {
             __state = null;
 
+            if (__instance?.pawn == null)
+                return;
+
             if (!ShouldPreserveMountedAnimalStartJob(__instance, newJob, out var rider))
                 return;
 
@@ -210,10 +213,11 @@ namespace Multiplayer.Compat
         [MpCompatPrefix("GiddyUp.Harmony.Patch_StartJob", "Prefix")]
         private static bool PreGiddyUpPatchStartJob(Pawn_JobTracker __instance, ref bool __result)
         {
-            if (bypassMountedAnimalStartJobPawn != __instance?.pawn)
+            var pawn = __instance?.pawn;
+            if (pawn == null || bypassMountedAnimalStartJobPawn == null || bypassMountedAnimalStartJobPawn != pawn)
                 return true;
 
-            LogDebug($"Bypassing GiddyUp Patch_StartJob block for {DescribePawn(__instance.pawn)}");
+            LogDebug($"Bypassing GiddyUp Patch_StartJob block for {DescribePawn(pawn)}");
             __result = true;
             return false;
         }
@@ -222,6 +226,9 @@ namespace Multiplayer.Compat
         private static bool PreGiddyUpDetermineNextJobPostfix(Pawn_JobTracker __instance)
         {
             var rider = __instance?.pawn;
+            if (rider == null)
+                return true;
+
             if (!ShouldSkipGiddyUpMountedSanity(__instance, rider, out var mountedAnimal, out var reason))
                 return true;
 
@@ -569,7 +576,7 @@ namespace Multiplayer.Compat
         private static bool EnsureQueuedMountedJob(Pawn_JobTracker jobs, Pawn rider, string context)
         {
             var mountedAnimal = jobs?.pawn;
-            if (mountedAnimal == null || rider == null)
+            if (mountedAnimal == null || rider == null || jobs.jobQueue == null)
                 return false;
 
             if (mountedAnimal.CurJobDef?.defName == MountedJobDefName)
