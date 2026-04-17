@@ -333,10 +333,12 @@ namespace Multiplayer.Compat
         }
 
         [MpCompatFinalizer(typeof(JobDriver), nameof(JobDriver.DriverTick))]
-        private static void PostDriverTick(bool __state)
+        private static void PostDriverTick(JobDriver __instance, bool __state)
         {
             if (__state)
                 Rand.PopState();
+
+            SyncPreservedRiderToMount(__instance?.pawn);
         }
 
         private static int GetStableRandSeed(Pawn pawn, int extraSeed = 0)
@@ -617,6 +619,28 @@ namespace Multiplayer.Compat
             }
 
             return true;
+        }
+
+        private static void SyncPreservedRiderToMount(Pawn mountedAnimal)
+        {
+            if (mountedAnimal == null || mountedAnimal.CurJobDef?.defName == MountedJobDefName)
+                return;
+
+            if (!preservedMountedRidersByAnimal.TryGetValue(mountedAnimal, out var rider))
+                return;
+
+            if (!ShouldKeepMountedPairPreserved(rider, mountedAnimal))
+                return;
+
+            if (!rider.Spawned || rider.Map != mountedAnimal.Map)
+                return;
+
+            if (rider.Position == mountedAnimal.Position && rider.Rotation == mountedAnimal.Rotation)
+                return;
+
+            rider.Position = mountedAnimal.Position;
+            rider.Rotation = mountedAnimal.Rotation;
+            rider.pather?.ResetToCurrentPosition();
         }
 
         private static bool EnsureQueuedMountedJob(Pawn_JobTracker jobs, Pawn rider, string context)
