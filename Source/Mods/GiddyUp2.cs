@@ -62,7 +62,6 @@ namespace Multiplayer.Compat
                 // Delay this registration until loading has finished so accessing the patch type can't trip
                 // its translation-dependent initialization before RimWorld has an active language.
                 LongEventHandler.ExecuteWhenFinished(RegisterRideAndRollGizmoSync);
-                LongEventHandler.ExecuteWhenFinished(AllowMountedAbilityJobs);
             }
 
             // FloatMenus
@@ -139,6 +138,12 @@ namespace Multiplayer.Compat
             var useVerbOnThing = DefDatabase<JobDef>.GetNamedSilentFail("UseVerbOnThing");
             if (useVerbOnThing != null)
                 setAllowedMountedJob(null, useVerbOnThing, true);
+        }
+
+        [MpCompatPostfix("GiddyUp.Jobs.JobDriver_Mounted", "BuildAllowedJobsCache")]
+        private static void PostBuildAllowedJobsCache()
+        {
+            AllowMountedAbilityJobs();
         }
 
         private static void SyncExtendedPawnData(SyncWorker sync, ref object extendedPawnData)
