@@ -21,6 +21,7 @@ namespace Multiplayer.Compat
 
         // ExtendedPawnData/ExtendedDataStorage
         private static AccessTools.FieldRef<object, Pawn> extendedPawnDataPawn;
+        private static AccessTools.FieldRef<object, Pawn> extendedPawnDataMount;
         private static FastInvokeHandler getExtendedPawnData;
 
         // Patch_TransferableOneWayWidget
@@ -85,6 +86,7 @@ namespace Multiplayer.Compat
                 // ExtendedPawnData — field renamed from "pawn" to "_pawn"
                 var type = AccessTools.TypeByName("GiddyUp.ExtendedPawnData");
                 extendedPawnDataPawn = AccessTools.FieldRefAccess<Pawn>(type, "_pawn");
+                extendedPawnDataMount = AccessTools.FieldRefAccess<Pawn>(type, "<Mount>k__BackingField");
                 MP.RegisterSyncWorker<object>(SyncExtendedPawnData, type);
 
                 // Method renamed from GetGUData to GetExtendedPawnData
@@ -212,11 +214,11 @@ namespace Multiplayer.Compat
             if (pawn == null)
                 return true;
 
-            var pawnData = pawn.GetExtendedPawnData();
+            var pawnData = getExtendedPawnData(null, pawn);
 
             // DrawOffset runs in render code; avoid local-only gameplay mutation from its null-mount failsafe.
             // Shared job logic already has its own mounted-state sanity checks during simulation ticks.
-            if (pawnData.Mount == null)
+            if (pawnData == null || extendedPawnDataMount(pawnData) == null)
             {
                 __result = Vector3.zero;
                 return false;
