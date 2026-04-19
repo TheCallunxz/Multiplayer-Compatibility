@@ -16,6 +16,8 @@ internal class DeepAndDeeper
     public DeepAndDeeper(ModContentPack mod)
     {
         // Register gizmo callbacks after loading so CaveEntrance static texture init runs on main thread.
+        // Also defer CaveEntrance:Tick rand patch — Harmony JIT-compiling it triggers CaveEntrance's static
+        // constructor which loads textures and must happen on the main thread.
         LongEventHandler.ExecuteWhenFinished(() =>
         {
             // Gizmos that change shared state.
@@ -25,19 +27,47 @@ internal class DeepAndDeeper
             // Dev-only cave controls.
             MpCompat.RegisterLambdaMethod("Shashlichnik.CaveEntrance", "GetGizmos", 3, 4).SetDebugOnly();
             MP.RegisterSyncMethod(AccessTools.DeclaredMethod("Shashlichnik.DebugActions:MoveAllPawns")).SetDebugOnly();
-        });
 
-        // Uses Find.CurrentMap during map generation while a map argument is available.
-        PatchingUtilities.ReplaceCurrentMapUsage("Shashlichnik.GenStep_DeepDiver:TrySpawnInterestAt");
+            // Deferred: patching CaveEntrance:Tick triggers its static ctor (texture loads) via Harmony JIT.
+            PatchingUtilities.PatchPushPopRand("Shashlichnik.CaveEntrance:Tick");
+        });
 
         // Local camera/ambient visual paths call Rand and can desync RNG state.
-        PatchingUtilities.PatchPushPopRand(new[]
-        {
-            "Shashlichnik.CaveMapComponent:ProcessAmbient",
-            "Shashlichnik.CaveEntrance:Tick",
-        });
+        // CaveEntrance:Tick is deferred above; ProcessAmbient is on MapComponent so safe to patch eagerly.
+        PatchingUtilities.PatchPushPopRand("Shashlichnik.CaveMapComponent:ProcessAmbient");
+
+        // GenStep_DeepDiver.TrySpawnInterestAt uses Find.CurrentMap but GenStep is not a supported type
+        // for ReplaceCurrentMapUsage. A custom transpiler replaces it with the already-available `map` arg.
+        // (see TrySpawnInterestAtTranspiler below)
 
         MpCompatPatchLoader.LoadPatch<DeepAndDeeper>();
+    }
+
+    [MpCompatTranspiler("Shashlichnik.GenStep_DeepDiver", "TrySpawnInterestAt")]
+    private static IEnumerable<CodeInstruction> TrySpawnInterestAtTranspiler(IEnumerable<CodeInstruction> instructions, MethodBase __originalMethod)
+    {
+        var currentMapGetter = AccessTools.PropertyGetter(typeof(Find), nameof(Find.CurrentMap));
+        var patched = false;
+
+        foreach (var instruction in instructions)
+        {
+            if (!patched && instruction.Calls(currentMapGetter))
+            {
+                // TrySpawnInterestAt(Map map, IntVec3 thingPos) — map is arg 1 on this instance method.
+                yield return new CodeInstruction(OpCodes.Ldarg_1)
+                {
+                    labels = instruction.labels,
+                    blocks = instruction.blocks,
+                };
+                patched = true;
+                continue;
+            }
+
+            yield return instruction;
+        }
+
+        if (!patched)
+            Log.Warning($"[MP Compat] Failed to patch Find.CurrentMap in {__originalMethod.FullDescription()}.");
     }
 
     [MpCompatTranspiler("Shashlichnik.CaveMapComponent", "ProcessCollapsing")]
