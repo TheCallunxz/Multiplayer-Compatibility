@@ -86,7 +86,7 @@ namespace Multiplayer.Compat
                 // ExtendedPawnData — field renamed from "pawn" to "_pawn"
                 var type = AccessTools.TypeByName("GiddyUp.ExtendedPawnData");
                 extendedPawnDataPawn = AccessTools.FieldRefAccess<Pawn>(type, "_pawn");
-                extendedPawnDataMount = AccessTools.FieldRefAccess<Pawn>(type, "<Mount>k__BackingField");
+                extendedPawnDataMount = AccessTools.FieldRefAccess<Pawn>(type, "_mount");
                 MP.RegisterSyncWorker<object>(SyncExtendedPawnData, type);
 
                 // Method renamed from GetGUData to GetExtendedPawnData
