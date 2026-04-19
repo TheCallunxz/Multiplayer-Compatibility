@@ -1,6 +1,7 @@
 ﻿using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
+using UnityEngine;
 using Verse;
 using Verse.AI;
 
@@ -29,6 +30,12 @@ namespace Multiplayer.Compat
         // Designator
         private static AccessTools.FieldRef<object, Area> designatorSelectedArea;
         private static AccessTools.FieldRef<object, string> designatorAreaLabel;
+
+        private static readonly string[] RideAndRollPawnGizmoTypes =
+        {
+            "GiddyUpCore.RideAndRoll.Harmony.Pawn_GetGizmos",
+            "GiddyUpRideAndRoll.Harmony.Pawn_GetGizmos",
+        };
 
         public GiddyUp2(ModContentPack mod)
         {
@@ -92,6 +99,13 @@ namespace Multiplayer.Compat
                 // used by the subclasses which have parameterless ones (they provide the argument themselves).
                 MP.RegisterSyncWorker<Designator>(SyncGiddyUpDesignator, type, isImplicit: true, shouldConstruct: true);
             }
+
+            // Current map usage
+            {
+                // Ride-and-Roll uses current map in a map component tick path (reported by unpatched scan).
+                // Keep behavior scoped to that component's map in MP to avoid per-client camera/map divergence.
+                PatchingUtilities.ReplaceCurrentMapUsage("GiddyUpCore.SaddleUp.Coordinator:MapComponentTick", false, false);
+            }
         }
 
         private static void WatchTranferableCount(TransferableOneWay ___trad)
@@ -102,10 +116,16 @@ namespace Multiplayer.Compat
 
         private static void RegisterRideAndRollGizmoSync()
         {
-            var type = AccessTools.TypeByName("GiddyUpCore.RideAndRoll.Harmony.Pawn_GetGizmos");
+            foreach (var typeName in RideAndRollPawnGizmoTypes)
+            {
+                var type = AccessTools.TypeByName(typeName);
+                if (type == null)
+                    continue;
 
-            if (type != null)
+                // Some versions expose a helper method, others only contain the gizmo lambda.
                 MP.RegisterSyncMethod(type, "PawnEndCurrentJob");
+                MpCompat.RegisterLambdaDelegate(type, "Postfix", 0);
+            }
         }
 
         private static void SyncExtendedPawnData(SyncWorker sync, ref object extendedPawnData)
@@ -180,6 +200,29 @@ namespace Multiplayer.Compat
                 seed = Gen.HashCombineInt(seed, extraSeed);
 
             return seed;
+        }
+
+        [MpCompatPrefix("GiddyUp.Harmony.Pawn_DrawTracker_DrawPos", "DrawOffset")]
+        private static bool PreDrawOffset(Pawn_DrawTracker __instance, ref Vector3 __result)
+        {
+            if (!MP.IsInMultiplayer)
+                return true;
+
+            var pawn = __instance?.pawn;
+            if (pawn == null)
+                return true;
+
+            var pawnData = pawn.GetExtendedPawnData();
+
+            // DrawOffset runs in render code; avoid local-only gameplay mutation from its null-mount failsafe.
+            // Shared job logic already has its own mounted-state sanity checks during simulation ticks.
+            if (pawnData.Mount == null)
+            {
+                __result = Vector3.zero;
+                return false;
+            }
+
+            return true;
         }
     }
 }
