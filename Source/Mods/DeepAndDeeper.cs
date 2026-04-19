@@ -15,13 +15,17 @@ internal class DeepAndDeeper
 
     public DeepAndDeeper(ModContentPack mod)
     {
-        // Gizmos that change shared state.
-        MpCompat.RegisterLambdaMethod("Shashlichnik.CaveEntrance", "GetGizmos", 2);
-        MpCompat.RegisterLambdaMethod("Shashlichnik.CaveExit", "GetGizmos", 1);
+        // Register gizmo callbacks after loading so CaveEntrance static texture init runs on main thread.
+        LongEventHandler.ExecuteWhenFinished(() =>
+        {
+            // Gizmos that change shared state.
+            MpCompat.RegisterLambdaMethod("Shashlichnik.CaveEntrance", "GetGizmos", 2);
+            MpCompat.RegisterLambdaMethod("Shashlichnik.CaveExit", "GetGizmos", 1);
 
-        // Dev-only cave controls.
-        MpCompat.RegisterLambdaMethod("Shashlichnik.CaveEntrance", "GetGizmos", 3, 4).SetDebugOnly();
-        MP.RegisterSyncMethod(AccessTools.DeclaredMethod("Shashlichnik.DebugActions:MoveAllPawns")).SetDebugOnly();
+            // Dev-only cave controls.
+            MpCompat.RegisterLambdaMethod("Shashlichnik.CaveEntrance", "GetGizmos", 3, 4).SetDebugOnly();
+            MP.RegisterSyncMethod(AccessTools.DeclaredMethod("Shashlichnik.DebugActions:MoveAllPawns")).SetDebugOnly();
+        });
 
         // Uses Find.CurrentMap during map generation while a map argument is available.
         PatchingUtilities.ReplaceCurrentMapUsage("Shashlichnik.GenStep_DeepDiver:TrySpawnInterestAt");
@@ -50,7 +54,14 @@ internal class DeepAndDeeper
                 // Keep the first check (camera/audio), but force the landslide roll to use this component's map.
                 if (currentMapCheckCount == 2)
                 {
-                    yield return new CodeInstruction(OpCodes.Ldarg_0);
+                    var loadComponent = new CodeInstruction(OpCodes.Ldarg_0)
+                    {
+                        // Preserve jump targets/exception block metadata from replaced instruction.
+                        labels = instruction.labels,
+                        blocks = instruction.blocks,
+                    };
+
+                    yield return loadComponent;
                     yield return new CodeInstruction(OpCodes.Call, MpMethodUtil.MethodOf(GetMapFromComponent));
                     continue;
                 }
@@ -65,4 +76,3 @@ internal class DeepAndDeeper
 
     private static Map GetMapFromComponent(MapComponent component) => component.map;
 }
-
