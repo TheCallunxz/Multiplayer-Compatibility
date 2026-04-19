@@ -1,4 +1,5 @@
-﻿using HarmonyLib;
+﻿using System;
+using HarmonyLib;
 using Multiplayer.API;
 using RimWorld;
 using UnityEngine;
@@ -266,4 +267,3 @@ namespace Multiplayer.Compat
         }
     }
 }
-
