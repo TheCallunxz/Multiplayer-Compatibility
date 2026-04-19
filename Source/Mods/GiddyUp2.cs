@@ -38,6 +38,8 @@ namespace Multiplayer.Compat
             "GiddyUpRideAndRoll.Harmony.Pawn_GetGizmos",
         };
 
+        private const string SaddleUpPawnGizmoType = "SaddleUp.Pawn_GetGizmos_SU2";
+
         public GiddyUp2(ModContentPack mod)
         {
             MpCompatPatchLoader.LoadPatch<GiddyUp2>();
@@ -50,7 +52,11 @@ namespace Multiplayer.Compat
                 // Stop waiting for rider (namespace changed to GiddyUpCore.RideAndRoll.Harmony)
                 // Delay this registration until loading has finished so accessing the patch type can't trip
                 // its translation-dependent initialization before RimWorld has an active language.
-                LongEventHandler.ExecuteWhenFinished(RegisterRideAndRollGizmoSync);
+                LongEventHandler.ExecuteWhenFinished(() =>
+                {
+                    RegisterRideAndRollGizmoSync();
+                    RegisterSaddleUpGizmoSync();
+                });
             }
 
             // FloatMenus
@@ -128,6 +134,38 @@ namespace Multiplayer.Compat
                 MP.RegisterSyncMethod(type, "PawnEndCurrentJob");
                 MpCompat.RegisterLambdaDelegate(type, "Postfix", 0);
             }
+        }
+
+        private static void RegisterSaddleUpGizmoSync()
+        {
+            var type = AccessTools.TypeByName(SaddleUpPawnGizmoType);
+            if (type == null)
+                return;
+
+            // Mount gizmos are built through helper methods with version-dependent lambda shapes.
+            // Try common methods/ordinals so sync survives minor method-body changes.
+            TryRegisterLambdaDelegates(type, "Postfix", 0, 1, 2, 3);
+            TryRegisterLambdaDelegates(type, "CreateGizmo_ToggleMount", 0, 1, 2, 3);
+            TryRegisterLambdaDelegates(type, "CreateGizmo_GoAndMount", 0, 1, 2, 3);
+            TryRegisterLambdaDelegates(type, "CreateGizmo_Dismount", 0, 1, 2, 3);
+        }
+
+        private static void TryRegisterLambdaDelegate(Type type, string methodName, int lambdaOrdinal)
+        {
+            try
+            {
+                MpCompat.RegisterLambdaDelegate(type, methodName, lambdaOrdinal);
+            }
+            catch
+            {
+                // Different Giddy-Up builds expose different compiler-generated lambdas.
+            }
+        }
+
+        private static void TryRegisterLambdaDelegates(Type type, string methodName, params int[] lambdaOrdinals)
+        {
+            foreach (var lambdaOrdinal in lambdaOrdinals)
+                TryRegisterLambdaDelegate(type, methodName, lambdaOrdinal);
         }
 
         private static void SyncExtendedPawnData(SyncWorker sync, ref object extendedPawnData)
@@ -228,3 +266,4 @@ namespace Multiplayer.Compat
         }
     }
 }
+
