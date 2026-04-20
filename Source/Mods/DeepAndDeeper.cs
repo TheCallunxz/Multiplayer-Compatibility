@@ -17,6 +17,8 @@ internal class DeepAndDeeper
     private static readonly Type factionExtensionsType = AccessTools.TypeByName("Multiplayer.Client.Factions.FactionExtensions");
     private static readonly MethodInfo pushFactionMethod = AccessTools.Method(factionExtensionsType, "PushFaction", new[] { typeof(Map), typeof(Faction), typeof(bool) });
     private static readonly MethodInfo popFactionMethod = AccessTools.Method(factionExtensionsType, "PopFaction", new[] { typeof(Map) });
+    private static readonly FieldInfo caveMapComponentCaveEntranceField = AccessTools.Field("Shashlichnik.CaveMapComponent:caveEntrance");
+    private static readonly FieldInfo caveMapComponentCaveExitField = AccessTools.Field("Shashlichnik.CaveMapComponent:caveExit");
 
     private static bool missingPushFactionWarningLogged;
     private static bool missingPopFactionWarningLogged;
@@ -151,21 +153,49 @@ internal class DeepAndDeeper
     // Uses force:true because the global FactionContext already equals forPawn.Faction (set by
     // ExecuteCmd) — without force, Push would no-op and skip the per-map manager swap.
     [MpCompatPrefix("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
-    private static void TryFindFirstAvailableJobTargetAtPrefix(Thing caveExit, Pawn forPawn)
+    private static void TryFindFirstAvailableJobTargetAtPrefix(Thing caveExit, Pawn forPawn, ref bool __state)
     {
-        PushFactionContext(caveExit?.Map, forPawn?.Faction);
+        __state = TryPushFactionContext(caveExit?.Map, forPawn?.Faction);
     }
 
     [MpCompatFinalizer("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
-    private static void TryFindFirstAvailableJobTargetAtFinalizer(Thing caveExit)
+    private static void TryFindFirstAvailableJobTargetAtFinalizer(Thing caveExit, bool __state)
     {
-        PopFactionContext(caveExit?.Map);
+        PopFactionContext(caveExit?.Map, __state);
     }
 
-    private static void PushFactionContext(Map map, Faction faction)
+    // Cave stability calculations use AllColonistBuildingsOfType (Faction.OfPlayer-dependent).
+    // During regular map ticking there is no per-cave map faction push, so different clients can
+    // evaluate cave stability under different factions and diverge on Rand.Chance calls.
+    [MpCompatPrefix("Shashlichnik.CaveMapComponent", "ProcessStability")]
+    private static void ProcessStabilityPrefix(MapComponent __instance, ref bool __state)
+    {
+        __state = TryPushFactionContext(__instance?.map, GetCaveComponentFaction(__instance));
+    }
+
+    [MpCompatFinalizer("Shashlichnik.CaveMapComponent", "ProcessStability")]
+    private static void ProcessStabilityFinalizer(MapComponent __instance, bool __state)
+    {
+        PopFactionContext(__instance?.map, __state);
+    }
+
+    private static Faction GetCaveComponentFaction(MapComponent mapComponent)
+    {
+        if (mapComponent == null)
+            return null;
+
+        var entrance = caveMapComponentCaveEntranceField?.GetValue(mapComponent) as Thing;
+        if (entrance?.Faction != null)
+            return entrance.Faction;
+
+        var caveExit = caveMapComponentCaveExitField?.GetValue(mapComponent) as Thing;
+        return caveExit?.Faction;
+    }
+
+    private static bool TryPushFactionContext(Map map, Faction faction)
     {
         if (map == null || faction == null)
-            return;
+            return false;
 
         if (pushFactionMethod == null)
         {
@@ -174,15 +204,16 @@ internal class DeepAndDeeper
                 missingPushFactionWarningLogged = true;
                 Log.Warning("[MP Compat] Missing Multiplayer.Client.Factions.FactionExtensions.PushFaction(Map,Faction,bool); cave workgiver patch will run without cave-map faction context swap.");
             }
-            return;
+            return false;
         }
 
         pushFactionMethod.Invoke(null, new object[] { map, faction, true });
+        return true;
     }
 
-    private static void PopFactionContext(Map map)
+    private static void PopFactionContext(Map map, bool pushed)
     {
-        if (map == null)
+        if (!pushed || map == null)
             return;
 
         if (popFactionMethod == null)
