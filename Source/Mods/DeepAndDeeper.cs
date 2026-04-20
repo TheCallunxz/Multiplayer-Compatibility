@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
+using Multiplayer.Client.Factions;
 using RimWorld;
 using Verse;
 
@@ -131,6 +132,30 @@ internal class DeepAndDeeper
             Log.Warning($"[MP Compat] Failed to patch Faction.OfPlayer in {__originalMethod.FullDescription()}.");
     }
 
+    // WorkGiver_GoDownIfJobUnderground.TryFindFirstAvailableJobTargetAt accesses the cave
+    // (underground pocket) map's designationManager, areaManager, and other per-faction managers
+    // via caveExit.Map. However, ExecuteCmd only pushes faction context onto the *surface* map.
+    // Per-faction managers (designations, areas, haul destinations, etc.) are stored per map in
+    // FactionMapData. Without pushing the correct faction onto the cave map, its managers point
+    // to whichever faction was last active there — which differs between host and client.
+    // This causes PotentialTargetsUnderground (mine designations), IsTargetAvailable (allowed
+    // areas, haulables), and reachability checks to return different results per machine.
+    //
+    // Fix: push forPawn's faction onto the cave map before the method runs, pop in finalizer.
+    // Uses force:true because the global FactionContext already equals forPawn.Faction (set by
+    // ExecuteCmd) — without force, Push would no-op and skip the per-map manager swap.
+    [MpCompatPrefix("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
+    private static void TryFindFirstAvailableJobTargetAtPrefix(Thing caveExit, Pawn forPawn)
+    {
+        caveExit?.Map?.PushFaction(forPawn.Faction, force: true);
+    }
+
+    [MpCompatFinalizer("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
+    private static void TryFindFirstAvailableJobTargetAtFinalizer(Thing caveExit)
+    {
+        caveExit?.Map?.PopFaction();
+    }
+
     // Replacement for WorkGiver_GoDownIfJobUnderground.IsAlreadyReserved that uses the mining
     // pawn's own faction instead of Faction.OfPlayer, making the reservation check produce the
     // same result on all multiplayer clients.
@@ -140,6 +165,62 @@ internal class DeepAndDeeper
             return false;
         Pawn reserver = null;
         return target.Map.reservationManager?.TryGetReserver(target, forPawn.Faction, out reserver) ?? false;
+    }
+
+    // WorkGiver_GoDownIfJobUnderground_HaulToPortal.PotentialTargetsUnderground uses
+    // PawnsInFaction(Faction.OfPlayer) to enumerate colonists currently hauling to the portal.
+    // In multiplayer Faction.OfPlayer returns different factions on each client, so the
+    // "already loading" count differs per machine — some targets appear available on one client
+    // but not on another, causing TryFindFirstAvailableJobTargetAt to diverge.
+    //
+    // Fix: replace PawnsInFaction(Faction.OfPlayer) with FreeColonistsSpawned, which returns
+    // colonists from ALL player factions consistently on every client.
+    [MpCompatTranspiler("Shashlichnik.WorkGiver_GoDownIfJobUnderground_HaulToPortal", "PotentialTargetsUnderground")]
+    private static IEnumerable<CodeInstruction> PotentialTargetsUndergroundTranspiler(
+        IEnumerable<CodeInstruction> instructions,
+        MethodBase __originalMethod)
+    {
+        var factionOfPlayerGetter = AccessTools.PropertyGetter(typeof(Faction), nameof(Faction.OfPlayer));
+        var pawnsInFactionMethod = AccessTools.Method(typeof(MapPawns), nameof(MapPawns.PawnsInFaction));
+        var freeColonistsSpawnedGetter = AccessTools.PropertyGetter(typeof(MapPawns), nameof(MapPawns.FreeColonistsSpawned));
+        var patched = false;
+
+        CodeInstruction prev = null;
+
+        foreach (var current in instructions)
+        {
+            if (!patched && prev != null && prev.Calls(factionOfPlayerGetter) && current.Calls(pawnsInFactionMethod))
+            {
+                // Before:  call Faction.get_OfPlayer()  /  callvirt MapPawns.PawnsInFaction(Faction)
+                // After:   nop                          /  callvirt MapPawns.get_FreeColonistsSpawned()
+
+                // Replace Faction.get_OfPlayer() with nop (stack already has MapPawns).
+                var nop = new CodeInstruction(OpCodes.Nop);
+                nop.labels.AddRange(prev.labels);
+                nop.blocks.AddRange(prev.blocks);
+                yield return nop;
+
+                // Replace PawnsInFaction with FreeColonistsSpawned (no Faction arg needed).
+                var replacement = new CodeInstruction(OpCodes.Callvirt, freeColonistsSpawnedGetter);
+                replacement.labels.AddRange(current.labels);
+                replacement.blocks.AddRange(current.blocks);
+                yield return replacement;
+
+                patched = true;
+                prev = null;
+                continue;
+            }
+
+            if (prev != null)
+                yield return prev;
+            prev = current;
+        }
+
+        if (prev != null)
+            yield return prev;
+
+        if (!patched)
+            Log.Warning($"[MP Compat] Failed to patch Faction.OfPlayer in {__originalMethod.FullDescription()}.");
     }
 
     [MpCompatTranspiler("Shashlichnik.GenStep_DeepDiver", "TrySpawnInterestAt")]
