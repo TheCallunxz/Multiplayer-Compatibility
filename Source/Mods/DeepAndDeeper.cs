@@ -3,6 +3,7 @@ using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
+using RimWorld;
 using Verse;
 
 namespace Multiplayer.Compat;
@@ -41,6 +42,104 @@ internal class DeepAndDeeper
         // (see TrySpawnInterestAtTranspiler below)
 
         MpCompatPatchLoader.LoadPatch<DeepAndDeeper>();
+    }
+
+    // WorkGiver_GoDownIfJobUnderground.IsAlreadyReserved uses Faction.OfPlayer, which returns
+    // different factions on different clients in multiplayer. For example, if the host player has
+    // colonists who already reserved mine targets in the cave, IsAlreadyReserved returns true on
+    // the host but false on a client (whose faction has no reservations there). This causes
+    // TryFindFirstAvailableJobTargetAt to return different results per machine — on the client it
+    // finds valid mine work and creates a candidate job, on the host it finds nothing and falls
+    // through to a wander job. The different job counts desync the UniqueID counter and cascade
+    // into a full desync whenever AutoEnter is enabled.
+    //
+    // Fix: transpile IsTargetAvailable to replace the `this.IsAlreadyReserved(target)` call with
+    // a static helper that checks reservations against forPawn.Faction (the mining pawn's own
+    // faction) rather than Faction.OfPlayer (the local client's player faction).
+    [MpCompatTranspiler("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "IsTargetAvailable")]
+    private static IEnumerable<CodeInstruction> IsTargetAvailableTranspiler(
+        IEnumerable<CodeInstruction> instructions,
+        MethodBase __originalMethod)
+    {
+        var isAlreadyReservedMethod = AccessTools.DeclaredMethod(
+            "Shashlichnik.WorkGiver_GoDownIfJobUnderground:IsAlreadyReserved");
+        var replacementMethod = MpMethodUtil.MethodOf(IsAlreadyReservedForPawn);
+        var patched = false;
+
+        // Use a 2-instruction lookahead buffer so we can inspect the instructions that lead
+        // into the callvirt and transform them on the fly without collecting the whole list.
+        CodeInstruction prev2 = null;
+        CodeInstruction prev1 = null;
+
+        foreach (var current in instructions)
+        {
+            if (!patched && current.Calls(isAlreadyReservedMethod))
+            {
+                // Before `callvirt IsAlreadyReserved` the compiler emits:
+                //   ldarg.0   (push 'this' for the virtual call)
+                //   ldarg.1   (push 'target' argument)
+                //   callvirt  IsAlreadyReserved
+                //
+                // We want instead:
+                //   ldarg.1   (keep 'target' on stack)
+                //   ldarg.s 4 (push 'forPawn' — 5th method argument)
+                //   call      IsAlreadyReservedForPawn
+                //
+                // So replace the ldarg.0 (prev2) with a nop, keep ldarg.1 (prev1), insert
+                // an ldarg.s 4 for forPawn, then switch callvirt → call.
+
+                // Emit nop in place of ldarg.0 (prev2), preserving any jump labels/blocks.
+                var nop = new CodeInstruction(OpCodes.Nop);
+                if (prev2 != null)
+                {
+                    nop.labels.AddRange(prev2.labels);
+                    nop.blocks.AddRange(prev2.blocks);
+                }
+                yield return nop;
+
+                // Keep ldarg.1 (target) as-is.
+                if (prev1 != null)
+                    yield return prev1;
+
+                // Push forPawn (arg index 4: this=0, target=1, map=2, startPos=3, forPawn=4).
+                yield return new CodeInstruction(OpCodes.Ldarg_S, (byte)4);
+
+                // Replace the callvirt with a direct call to our static helper.
+                var call = new CodeInstruction(OpCodes.Call, replacementMethod);
+                call.labels.AddRange(current.labels);
+                call.blocks.AddRange(current.blocks);
+                yield return call;
+
+                patched = true;
+                prev2 = null;
+                prev1 = null;
+                continue;
+            }
+
+            // Normal path: flush the oldest buffered instruction and shift.
+            if (prev2 != null)
+                yield return prev2;
+            prev2 = prev1;
+            prev1 = current;
+        }
+
+        // Flush remaining buffer.
+        if (prev2 != null) yield return prev2;
+        if (prev1 != null) yield return prev1;
+
+        if (!patched)
+            Log.Warning($"[MP Compat] Failed to patch Faction.OfPlayer in {__originalMethod.FullDescription()}.");
+    }
+
+    // Replacement for WorkGiver_GoDownIfJobUnderground.IsAlreadyReserved that uses the mining
+    // pawn's own faction instead of Faction.OfPlayer, making the reservation check produce the
+    // same result on all multiplayer clients.
+    private static bool IsAlreadyReservedForPawn(Thing target, Pawn forPawn)
+    {
+        if (target?.Map == null)
+            return false;
+        Pawn reserver = null;
+        return target.Map.reservationManager?.TryGetReserver(target, forPawn.Faction, ref reserver) ?? false;
     }
 
     [MpCompatTranspiler("Shashlichnik.GenStep_DeepDiver", "TrySpawnInterestAt")]

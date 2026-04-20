@@ -212,6 +212,38 @@ namespace Multiplayer.Compat
                 Rand.PopState();
         }
 
+        // GenerateMounts is called during incidents (raids, visitor/trader caravans) and uses
+        // Rand.Range calls to decide which animals to spawn as mounts. Even inside a seeded
+        // incident context, state mutations inside (GoMount/ExtendedDataStorage) can diverge
+        // between host and client if the incident random state was already subtly different.
+        // Wrapping with a deterministic seed isolates any rand consumption from the outer state
+        // and guarantees identical animals on both sides. The developer had originally intended
+        // to disable this entirely in MP (//if (MP.enabled) return false;) — this is a safer
+        // middle ground that keeps the feature while preventing desync.
+        [MpCompatPrefix("GiddyUp.MountUtility", "GenerateMounts")]
+        private static void PreGenerateMounts(IncidentParms parms, out bool __state)
+        {
+            __state = MP.IsInMultiplayer;
+
+            if (!__state)
+                return;
+
+            // Build a stable seed: current tick plus faction hash so different incidents
+            // that happen on the same tick (e.g. two caravans) still differ.
+            var seed = Find.TickManager.TicksGame;
+            if (parms?.faction != null)
+                seed = Gen.HashCombineInt(seed, parms.faction.GetHashCode());
+
+            Rand.PushState(seed);
+        }
+
+        [MpCompatFinalizer("GiddyUp.MountUtility", "GenerateMounts")]
+        private static void PostGenerateMounts(bool __state)
+        {
+            if (__state)
+                Rand.PopState();
+        }
+
         [MpCompatPrefix(typeof(JobDriver), nameof(JobDriver.DriverTick))]
         private static void PreDriverTick(JobDriver __instance, out bool __state)
         {
