@@ -139,7 +139,7 @@ internal class DeepAndDeeper
         if (target?.Map == null)
             return false;
         Pawn reserver = null;
-        return target.Map.reservationManager?.TryGetReserver(target, forPawn.Faction, ref reserver) ?? false;
+        return target.Map.reservationManager?.TryGetReserver(target, forPawn.Faction, out reserver) ?? false;
     }
 
     [MpCompatTranspiler("Shashlichnik.GenStep_DeepDiver", "TrySpawnInterestAt")]
