@@ -1,9 +1,9 @@
+using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Reflection.Emit;
 using HarmonyLib;
 using Multiplayer.API;
-using Multiplayer.Client.Factions;
 using RimWorld;
 using Verse;
 
@@ -14,6 +14,12 @@ namespace Multiplayer.Compat;
 internal class DeepAndDeeper
 {
     private static readonly MethodInfo findCurrentMapGetter = AccessTools.PropertyGetter(typeof(Find), nameof(Find.CurrentMap));
+    private static readonly Type factionExtensionsType = AccessTools.TypeByName("Multiplayer.Client.Factions.FactionExtensions");
+    private static readonly MethodInfo pushFactionMethod = AccessTools.Method(factionExtensionsType, "PushFaction", new[] { typeof(Map), typeof(Faction), typeof(bool) });
+    private static readonly MethodInfo popFactionMethod = AccessTools.Method(factionExtensionsType, "PopFaction", new[] { typeof(Map) });
+
+    private static bool missingPushFactionWarningLogged;
+    private static bool missingPopFactionWarningLogged;
 
     public DeepAndDeeper(ModContentPack mod)
     {
@@ -147,13 +153,49 @@ internal class DeepAndDeeper
     [MpCompatPrefix("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
     private static void TryFindFirstAvailableJobTargetAtPrefix(Thing caveExit, Pawn forPawn)
     {
-        caveExit?.Map?.PushFaction(forPawn.Faction, force: true);
+        PushFactionContext(caveExit?.Map, forPawn?.Faction);
     }
 
     [MpCompatFinalizer("Shashlichnik.WorkGiver_GoDownIfJobUnderground", "TryFindFirstAvailableJobTargetAt")]
     private static void TryFindFirstAvailableJobTargetAtFinalizer(Thing caveExit)
     {
-        caveExit?.Map?.PopFaction();
+        PopFactionContext(caveExit?.Map);
+    }
+
+    private static void PushFactionContext(Map map, Faction faction)
+    {
+        if (map == null || faction == null)
+            return;
+
+        if (pushFactionMethod == null)
+        {
+            if (!missingPushFactionWarningLogged)
+            {
+                missingPushFactionWarningLogged = true;
+                Log.Warning("[MP Compat] Missing Multiplayer.Client.Factions.FactionExtensions.PushFaction(Map,Faction,bool); cave workgiver patch will run without cave-map faction context swap.");
+            }
+            return;
+        }
+
+        pushFactionMethod.Invoke(null, new object[] { map, faction, true });
+    }
+
+    private static void PopFactionContext(Map map)
+    {
+        if (map == null)
+            return;
+
+        if (popFactionMethod == null)
+        {
+            if (!missingPopFactionWarningLogged)
+            {
+                missingPopFactionWarningLogged = true;
+                Log.Warning("[MP Compat] Missing Multiplayer.Client.Factions.FactionExtensions.PopFaction(Map); cave workgiver patch will run without cave-map faction context restore.");
+            }
+            return;
+        }
+
+        popFactionMethod.Invoke(null, new object[] { map });
     }
 
     // Replacement for WorkGiver_GoDownIfJobUnderground.IsAlreadyReserved that uses the mining
