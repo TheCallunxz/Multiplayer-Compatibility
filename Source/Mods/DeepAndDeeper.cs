@@ -43,6 +43,9 @@ internal class DeepAndDeeper
         });
 
         // Local camera/ambient visual paths call Rand and can desync RNG state.
+        // Keep gameplay-affecting stability rolls untouched; isolate landslide visual roll drift.
+        PatchingUtilities.PatchPushPopRand("Shashlichnik.CaveMapComponent:ProcessLandslide");
+
         // CaveEntrance:Tick is deferred above; ProcessAmbient is on MapComponent so safe to patch eagerly.
         PatchingUtilities.PatchPushPopRand("Shashlichnik.CaveMapComponent:ProcessAmbient");
 
